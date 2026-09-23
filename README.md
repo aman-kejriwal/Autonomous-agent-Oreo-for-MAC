@@ -53,6 +53,22 @@ macbrow inverts this. Code owns the workflow and hands Jev small, typed question
   last web task? Does the request have the dates a form needs? Did the generated script
   really do what was asked? Each is a single Noul or Choice, a few hundred milliseconds.
 
+- **It knows what you're working on.** Every second the context poller reads what is open in
+  the front app (the selected note, the Chrome/Safari tab, the Finder folder, the TextEdit
+  document, the Mail message; see [`macbrow/focus.py`](macbrow/focus.py)) and remembers what
+  was open in apps you just left. Jev gets both, and tools of the app in front come first, so
+  "create a note called My_Note", then "write buy milk", then (from Chrome) "add call mom to my
+  note" all land in My_Note without naming it. Tools reach the open object through the built-in
+  `{{focus_id}}` / `{{focus_name}}` placeholders. When a new tool has to be written, the
+  codegen tier gets the target app's real AppleScript dictionary (its bundled `.sdef`) instead
+  of guessing commands.
+- **It stays where you are.** Tools that would take you elsewhere (switch apps, open a window,
+  tab or other note) are marked `moves` (declared in `seed.json`, detected in generated
+  scripts). The routing request also judges whether you *explicitly* asked to go somewhere
+  ("open Spotify", "go to github"). If not, the agent re-routes among in-place tools
+  (`search_here`, `app_action`, the front app's own tools, a web task in the current tab), and
+  if none fits it asks "That would take you out of this page. Should I...?" before leaving.
+
 Measured on this machine: "add the best vacuum cleaner to my Amazon cart" completed in 4
 steps and 11 s; "the return date should be November 4th" as a follow-up in the same tab, 6
 steps and 3.7 s; "play the Love Hypothesis trailer" from end of speech to video playing,

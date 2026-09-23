@@ -60,3 +60,13 @@ def test_risky_detection_from_script():
     t = Tool.from_dict({"name": "x", "description": "d", "script": 'tell application "Finder" to move f to g'}, "seed")
     assert t.risky
     assert registry.RISKY_PATTERNS.search("keystroke")
+
+
+def test_seed_tools_can_opt_out_of_keystroke_risk():
+    from macbrow.registry import Tool
+
+    script = 'tell application "System Events" to keystroke "x"'
+    assert Tool.from_dict({"name": "a", "description": "d", "script": script}, "seed").risky
+    assert not Tool.from_dict({"name": "a", "description": "d", "script": script, "risky": False}, "seed").risky
+    # generated tools cannot opt out
+    assert Tool.from_dict({"name": "a", "description": "d", "script": script, "risky": False}, "learned").risky

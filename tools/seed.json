@@ -46,7 +46,8 @@
       "go back to Chrome",
       "launch Spotify"
     ],
-    "not_for": "Websites, URLs, web searches, or anything the user says to do 'in the browser' or 'from the browser'; those belong to a browser tool (safari_open / chrome_open)."
+    "not_for": "Websites, URLs, web searches, or anything the user says to do 'in the browser' or 'from the browser'; those belong to a browser tool (safari_open / chrome_open).",
+    "moves": true
   },
   {
     "name": "quit_app",
@@ -78,6 +79,100 @@
       "hide everything else",
       "clear the desktop"
     ]
+  },
+  {
+    "name": "search_here",
+    "description": "Search for something inside the app or website the user is on right now: the site open in the browser tab (YouTube, Amazon, GitHub... in the same tab) or the front app's own search (Spotify, Notes, Mail, Finder, a web app...).",
+    "scope": null,
+    "args": [
+      {
+        "name": "query",
+        "kind": "text",
+        "instructions": "What to search for, without command words like 'search for' or 'look up'."
+      }
+    ],
+    "computed": {
+      "search_url": {
+        "fn": "site_search_url",
+        "from": "query",
+        "with_focus": true
+      }
+    },
+    "script": "set q to \"{{query}}\"\nset u to \"{{search_url}}\"\ntell application \"System Events\" to set frontApp to name of first application process whose frontmost is true\nif frontApp is \"Google Chrome\" then\n  tell application \"Google Chrome\" to set URL of active tab of front window to u\n  return \"Searching for \" & q & \".\"\nelse if frontApp is \"Safari\" then\n  tell application \"Safari\" to set URL of current tab of front window to u\n  return \"Searching for \" & q & \".\"\nend if\n-- Any other app: its own search shortcut. Return is pressed only where it runs a search,\n-- so an unknown app never gets a stray Enter (it could send a message).\nset k to \"f\"\nset mods to {command down}\nset pressReturn to false\nif frontApp is \"Spotify\" then\n  set k to \"l\"\n  set pressReturn to true\nelse if frontApp is in {\"Notes\", \"Mail\"} then\n  set mods to {command down, option down}\n  set pressReturn to true\nelse if frontApp is in {\"Music\", \"Finder\", \"Podcasts\", \"TV\", \"Books\", \"App Store\"} then\n  set pressReturn to true\nelse if frontApp is \"Slack\" then\n  set k to \"g\"\n  set pressReturn to true\nelse if frontApp is \"Web App\" then\n  set k to \"/\"\n  set mods to {}\n  set pressReturn to true\nend if\ntell application \"System Events\"\n  if mods is {} then\n    keystroke k\n  else\n    keystroke k using mods\n  end if\n  delay 0.4\n  keystroke q\n  if pressReturn then\n    delay 0.2\n    key code 36\n  end if\nend tell\nreturn \"Searching \" & frontApp & \" for \" & q & \".\"",
+    "speak": "result",
+    "risky": false,
+    "examples": [
+      "search for the espresso song",
+      "now search for lo-fi beats",
+      "look up wireless earbuds",
+      "find the budget email"
+    ],
+    "not_for": "A search on a site or app the user names that is not the one open (chrome_open / open_app first), or playing a specific video right away (youtube_play)."
+  },
+  {
+    "name": "type_here",
+    "description": "Type dictated text wherever the cursor is in the front app (a text box, search field, document), without pressing Enter.",
+    "scope": null,
+    "args": [
+      {
+        "name": "text",
+        "kind": "text",
+        "instructions": "The exact words to type, without command words like 'type' or 'write'."
+      }
+    ],
+    "script": "set t to \"{{text}}\"\ntell application \"System Events\" to keystroke t\nreturn \"typed\"",
+    "speak": "done",
+    "risky": false,
+    "examples": [
+      "type hello everyone",
+      "type in see you at five",
+      "write thanks for the update here"
+    ],
+    "not_for": "Writing into a note in Apple Notes (notes_write); searching (search_here)."
+  },
+  {
+    "name": "app_action",
+    "description": "Do a common action in the app in front: go back or forward, reload, new item, new or close or switch tab, undo, redo, find, save, zoom, scroll, jump to top or bottom.",
+    "scope": null,
+    "args": [
+      {
+        "name": "action",
+        "kind": "enum",
+        "instructions": "Which action in the front app does the user want?",
+        "criteria": {
+          "back": "Go back to the previous page/screen",
+          "forward": "Go forward again",
+          "reload": "Reload or refresh the page",
+          "new_item": "Create a new window/document/item (Cmd-N)",
+          "new_tab": "Open a new blank tab",
+          "close_tab": "Close the current tab or window",
+          "next_tab": "Switch to the next tab",
+          "previous_tab": "Switch to the previous tab",
+          "undo": "Undo the last change",
+          "redo": "Redo what was undone",
+          "find": "Open find-in-page / find bar",
+          "save": "Save the current document",
+          "zoom_in": "Make things bigger",
+          "zoom_out": "Make things smaller",
+          "scroll_down": "Scroll down a page",
+          "scroll_up": "Scroll up a page",
+          "top": "Jump to the top",
+          "bottom": "Jump to the bottom"
+        }
+      }
+    ],
+    "script": "set a to \"{{action}}\"\ntell application \"System Events\"\n  if a is \"back\" then\n    keystroke \"[\" using {command down}\n  else if a is \"forward\" then\n    keystroke \"]\" using {command down}\n  else if a is \"reload\" then\n    keystroke \"r\" using {command down}\n  else if a is \"new_item\" then\n    keystroke \"n\" using {command down}\n  else if a is \"new_tab\" then\n    keystroke \"t\" using {command down}\n  else if a is \"close_tab\" then\n    keystroke \"w\" using {command down}\n  else if a is \"next_tab\" then\n    key code 48 using {control down}\n  else if a is \"previous_tab\" then\n    key code 48 using {control down, shift down}\n  else if a is \"undo\" then\n    keystroke \"z\" using {command down}\n  else if a is \"redo\" then\n    keystroke \"z\" using {command down, shift down}\n  else if a is \"find\" then\n    keystroke \"f\" using {command down}\n  else if a is \"save\" then\n    keystroke \"s\" using {command down}\n  else if a is \"zoom_in\" then\n    keystroke \"=\" using {command down}\n  else if a is \"zoom_out\" then\n    keystroke \"-\" using {command down}\n  else if a is \"scroll_down\" then\n    key code 121\n  else if a is \"scroll_up\" then\n    key code 116\n  else if a is \"top\" then\n    key code 115\n  else if a is \"bottom\" then\n    key code 119\n  end if\nend tell\nreturn a",
+    "speak": "done",
+    "risky": false,
+    "examples": [
+      "go back",
+      "scroll down",
+      "undo that",
+      "next tab",
+      "zoom in",
+      "refresh"
+    ],
+    "not_for": "Quitting an app (quit_app); anything in an app that is not in front."
   },
   {
     "name": "toggle_dark_mode",
@@ -128,7 +223,8 @@
     "examples": [
       "lock my screen",
       "lock the mac"
-    ]
+    ],
+    "moves": false
   },
   {
     "name": "empty_trash",
@@ -149,7 +245,8 @@
     "speak": "The current page is {result}",
     "examples": [
       "what page am I on",
-      "read me the URL"
+      "read me the URL",
+      "what's the url of this page"
     ]
   },
   {
@@ -210,7 +307,8 @@
       "go to my google calendar from the browser",
       "search for weather in Paris",
       "search youtube for the love hypothesis"
-    ]
+    ],
+    "moves": true
   },
   {
     "name": "safari_new_tab",
@@ -220,7 +318,8 @@
     "speak": "done",
     "examples": [
       "new tab"
-    ]
+    ],
+    "moves": true
   },
   {
     "name": "safari_close_tab",
@@ -273,7 +372,8 @@
     "speak": "The current page is {result}",
     "examples": [
       "what page am I on",
-      "read me the URL"
+      "read me the URL",
+      "what's the url of this page"
     ]
   },
   {
@@ -334,7 +434,8 @@
       "go to my google calendar from the browser",
       "search for weather in Paris",
       "search youtube for the love hypothesis"
-    ]
+    ],
+    "moves": true
   },
   {
     "name": "youtube_play",
@@ -353,7 +454,7 @@
         "from": "query"
       }
     },
-    "script": "set vurl to \"{{video_url}}\"\ndo shell script \"open -na 'Google Chrome' --args \" & quoted form of (\"--profile-directory=\" & \"{{chrome_profile}}\") & \" \" & quoted form of vurl\nrepeat 15 times\n  delay 0.2\n  tell application \"System Events\" to set frontName to name of first application process whose frontmost is true\n  if frontName is \"Google Chrome\" then exit repeat\n  try\n    tell application \"System Events\" to set frontmost of process \"Google Chrome\" to true\n  end try\nend repeat\nreturn \"playing\"",
+    "script": "set vurl to \"{{video_url}}\"\n-- Already on YouTube in Chrome: play it in that tab instead of opening a new window.\ntell application \"System Events\" to set frontName to name of first application process whose frontmost is true\nif frontName is \"Google Chrome\" then\n  tell application \"Google Chrome\"\n    if (count of windows) > 0 then\n      if (URL of active tab of front window) contains \"youtube.com\" then\n        set URL of active tab of front window to vurl\n        return \"playing\"\n      end if\n    end if\n  end tell\nend if\ndo shell script \"open -na 'Google Chrome' --args \" & quoted form of (\"--profile-directory=\" & \"{{chrome_profile}}\") & \" \" & quoted form of vurl\nrepeat 15 times\n  delay 0.2\n  tell application \"System Events\" to set frontName to name of first application process whose frontmost is true\n  if frontName is \"Google Chrome\" then exit repeat\n  try\n    tell application \"System Events\" to set frontmost of process \"Google Chrome\" to true\n  end try\nend repeat\nreturn \"playing\"",
     "speak": "done",
     "examples": [
       "play the love hypothesis trailer",
@@ -361,7 +462,9 @@
       "put on the new Dune trailer",
       "play Bohemian Rhapsody"
     ],
-    "not_for": "Music app or Spotify playback; opening YouTube without a specific video."
+    "not_for": "Music app or Spotify playback; opening YouTube without a specific video.",
+    "moves": true,
+    "stays_on": "youtube.com"
   },
   {
     "name": "web_task",
@@ -372,8 +475,9 @@
       {
         "name": "site",
         "kind": "enum",
-        "instructions": "Which website should the task start on?",
+        "instructions": "Which website should the task start on? Keep to the page that is open (current_tab) unless the user names a different site.",
         "criteria": {
+          "current_tab": "The web page already open in the front Chrome tab (`open_in_frontmost_app`): the default whenever the user names no other website",
           "amazon": "Amazon shopping",
           "gmail": "Gmail / email",
           "google": "Google search or an unspecified site (non-shopping)",
@@ -399,7 +503,7 @@
       "find me cheap flights from paris to tokyo in october",
       "open linkedin and accept my pending connection requests"
     ],
-    "not_for": "Just opening a site or a plain search (chrome_open); playing a YouTube video (youtube_play); managing tabs or windows: closing, switching, reloading, going back (chrome_* / safari_* tools)."
+    "not_for": "Just opening a site or a plain search (chrome_open); playing a YouTube video (youtube_play); managing tabs or windows: closing, switching, reloading, going back (chrome_* / safari_* tools); the URL of the current tab (chrome_get_url); writing into a note (notes_* tools)."
   },
   {
     "name": "chrome_close_tab",
@@ -459,24 +563,89 @@
     "examples": [
       "open my downloads",
       "show the desktop folder"
-    ]
+    ],
+    "moves": true
   },
   {
     "name": "notes_create",
-    "description": "Create a new note in Apple Notes with dictated text.",
+    "description": "Create a new note in Apple Notes, optionally with a name/title and some text, and open it.",
     "scope": null,
     "args": [
       {
+        "name": "title",
+        "kind": "text",
+        "optional": true,
+        "instructions": "The name or title the user gives the new note ('called X', 'named X', 'titled X'). Not the note's text."
+      },
+      {
         "name": "body",
         "kind": "text",
-        "instructions": "The text the user wants written into the new note."
+        "optional": true,
+        "instructions": "The text the user wants written into the new note, apart from its name."
       }
     ],
-    "script": "tell application \"Notes\"\n  activate\n  make new note at folder \"Notes\" with properties {body:\"{{body}}\"}\nend tell\nreturn \"note created\"",
-    "speak": "done",
+    "script": "set t to \"{{title}}\"\nset b to \"{{body}}\"\nif t is \"\" and b is \"\" then set t to \"New Note\"\nset html to \"\"\nif t is not \"\" then set html to \"<h1>\" & t & \"</h1>\"\nif b is not \"\" then set html to html & \"<div>\" & b & \"</div>\"\ntell application \"Notes\"\n  activate\n  set n to make new note at default account with properties {body:html}\n  show n\n  delay 0.3\n  return \"Created \" & (name of n) & \".\"\nend tell",
+    "speak": "result",
     "examples": [
-      "make a note that says call the dentist",
-      "new note: ideas for the demo"
+      "create a note called My_Note",
+      "new note named shopping list",
+      "make a note that says call the dentist"
+    ],
+    "not_for": "Adding text to 'my note' / 'the note' / the note already open (notes_write).",
+    "moves": true
+  },
+  {
+    "name": "notes_open",
+    "description": "Find a note in Apple Notes by its name and open it.",
+    "scope": null,
+    "args": [
+      {
+        "name": "note_name",
+        "kind": "text",
+        "instructions": "The name (or part of the name) of the note to open."
+      }
+    ],
+    "script": "set q to \"{{note_name}}\"\ntell application \"Notes\"\n  set found to notes whose name contains q\n  if (count of found) is 0 then return \"I couldn't find a note called \" & q & \".\"\n  set n to item 1 of found\n  activate\n  show n\n  delay 0.3\n  return \"Opened \" & (name of n) & \".\"\nend tell",
+    "speak": "result",
+    "examples": [
+      "open my shopping list note",
+      "go to the note called ideas",
+      "show the My_Note note"
+    ],
+    "moves": true
+  },
+  {
+    "name": "notes_write",
+    "description": "Write or add text to the note the user is working on in Apple Notes ('my note', 'the note', or no note named): the one open now or opened last.",
+    "scope": "Notes",
+    "args": [
+      {
+        "name": "text",
+        "kind": "text",
+        "instructions": "The words to write into the note, without command words like 'write' or 'add'."
+      }
+    ],
+    "script": "set nid to \"{{focus_id}}\"\nset t to \"{{text}}\"\ntell application \"Notes\"\n  if nid is \"\" then\n    set s to selection\n    if (count of s) is 0 then return \"No note is open. Open or create one first.\"\n    set n to item 1 of s\n  else\n    set n to note id nid\n  end if\n  set body of n to (body of n) & \"<div>\" & t & \"</div>\"\n  return \"Added to \" & (name of n) & \".\"\nend tell",
+    "speak": "result",
+    "examples": [
+      "write buy milk and eggs",
+      "add water the plants to my note",
+      "put meeting at 5 in the note",
+      "also add call mom tomorrow"
+    ],
+    "not_for": "Creating a new note, or typing into apps other than Notes."
+  },
+  {
+    "name": "notes_read",
+    "description": "Read aloud the note that is open (the one the user is working on) in Apple Notes.",
+    "scope": "Notes",
+    "args": [],
+    "script": "set nid to \"{{focus_id}}\"\ntell application \"Notes\"\n  if nid is \"\" then\n    set s to selection\n    if (count of s) is 0 then return \"No note is open.\"\n    set n to item 1 of s\n  else\n    set n to note id nid\n  end if\n  set p to plaintext of n\n  if (length of p) > 400 then set p to (text 1 thru 400 of p) & \"...\"\n  return p\nend tell",
+    "speak": "result",
+    "examples": [
+      "read it back",
+      "what does my note say",
+      "read this note"
     ]
   },
   {
@@ -563,6 +732,7 @@
     "speak": "done",
     "examples": [
       "run git status in the terminal"
-    ]
+    ],
+    "moves": true
   }
 ]

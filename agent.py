@@ -4,13 +4,15 @@
     uv run python agent.py dev          # connect to LIVEKIT_URL as a worker
     uv run python agent.py download-files
 
-Pipeline: Gradium STT -> (Jev router -> AppleScript) | LLM for brief replies -> Gradium TTS.
+Pipeline: STT -> (Jev router -> AppleScript) | LLM for brief replies -> TTS.
+Speech defaults to free on-device Parakeet/Kokoro via mlx-audio; MACBROW_SPEECH=gradium uses Gradium.
 LLM defaults to LiveKit Inference (openai/gpt-5-mini); MACBROW_LLM_PROVIDER=lmstudio uses a local model.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from pathlib import Path
@@ -34,12 +36,30 @@ log = logging.getLogger("macbrow.voice")
 # HUD overlay manager – launches the SwiftUI pop-down and talks to it via stdin.
 # ---------------------------------------------------------------------------
 
+# The pop-up stays up for the whole conversation and hides only after this many seconds in which
+# nobody spoke and nothing was running (or when the user explicitly ends the session).
+HUD_IDLE_S = float(os.environ.get("MACBROW_HUD_IDLE_S", "5"))
+# After the user stops talking, speech-to-text can take seconds to deliver the words (local
+# Parakeet: up to ~9 s). That wait is not silence; it gets this much grace before the countdown.
+TRANSCRIPT_GRACE_S = float(os.environ.get("MACBROW_TRANSCRIPT_GRACE_S", "10"))
+
+
 class HUDOverlay:
-    """Manages the macbrow_ui companion process."""
+    """Manages the macbrow_ui companion process.
+
+    Presence: visible while the user speaks, while a turn is being handled, and while the agent
+    thinks or speaks; ``HUD_IDLE_S`` seconds after all of that stops it hides. Speaking again
+    brings it back (the agent keeps listening while it is hidden).
+    """
 
     def __init__(self) -> None:
         self._proc: asyncio.subprocess.Process | None = None
         self._hide_task: asyncio.Task | None = None
+        self._visible = False
+        self._user_speaking = False
+        self._agent_active = False  # thinking or speaking
+        self._busy = 0  # turns being handled (routing, AppleScript, browser tasks)
+        self._transcript_due = 0.0  # loop time until which the user's last words may still arrive
 
     async def start(self) -> None:
         bin_path = Path(__file__).resolve().parent / "macbrow_ui"
@@ -86,19 +106,59 @@ class HUDOverlay:
                 log.debug("HUD send error: %s", e)
 
     def show(self) -> None:
-        # Cancel any pending auto-hide so the HUD stays visible.
+        """Make sure the HUD is up and cancel any pending auto-hide."""
         if self._hide_task and not self._hide_task.done():
             self._hide_task.cancel()
-        self._send("SHOW")
+        if not self._visible:  # SHOW also clears the response line, so only send it when hidden
+            self._send("SHOW")
+            self._visible = True
 
     def hide(self, delay: float = 2.5) -> None:
-        """Hide the HUD after a short delay so the user can read the response."""
+        """Hide the HUD after ``delay`` seconds unless something shows it again first."""
+
         async def _delayed_hide() -> None:
             await asyncio.sleep(delay)
             self._send("HIDE")
+            self._visible = False
+
         if self._hide_task and not self._hide_task.done():
             self._hide_task.cancel()
         self._hide_task = asyncio.ensure_future(_delayed_hide())
+
+    # -- presence ------------------------------------------------------------------------
+    def user_speaking(self, speaking: bool) -> None:
+        if self._user_speaking and not speaking:
+            self._transcript_due = asyncio.get_running_loop().time() + TRANSCRIPT_GRACE_S
+        self._user_speaking = speaking
+        self._update()
+
+    def transcript_arrived(self) -> None:
+        """The words are in: from here on only the countdown (or the turn itself) matters."""
+        self._transcript_due = 0.0
+        self._update()
+
+    def agent_active(self, active: bool) -> None:
+        self._agent_active = active
+        self._update()
+
+    @contextlib.contextmanager
+    def busy(self):
+        self._busy += 1
+        self._transcript_due = 0.0
+        self._update()
+        try:
+            yield
+        finally:
+            self._busy -= 1
+            self._update()
+
+    def _update(self) -> None:
+        if self._user_speaking or self._agent_active or self._busy:
+            self.show()
+            return
+        # Silence countdown, after any wait for the last words; any activity cancels it.
+        waiting = max(0.0, self._transcript_due - asyncio.get_running_loop().time())
+        self.hide(delay=waiting + HUD_IDLE_S)
 
     def set_text(self, text: str) -> None:
         self._send(f"TEXT:{text}")
@@ -121,6 +181,7 @@ class HUDOverlay:
                 self._proc.kill()
         self._proc = None
 
+
 INSTRUCTIONS = """You are macbrow, a terse voice assistant that controls this Mac.
 Mac actions are handled by a fast tool router before you see the message, so anything
 that reaches you is small talk or a quick question. Answer in one short spoken sentence.
@@ -128,6 +189,40 @@ No markdown, no lists, no emoji, no follow-up questions."""
 
 LLM_PROVIDER = os.environ.get("MACBROW_LLM_PROVIDER", "livekit")  # "livekit" | "lmstudio"
 LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
+
+# "local": free, on-device Parakeet STT + Kokoro TTS served by mlx-audio (./console.sh starts it).
+# "gradium": Gradium streaming STT/TTS (needs GRADIUM_API_KEY and credits).
+SPEECH_PROVIDER = os.environ.get("MACBROW_SPEECH", "local")
+LOCAL_SPEECH_URL = os.environ.get("MACBROW_SPEECH_URL", "http://127.0.0.1:8123/v1")
+LOCAL_STT_MODEL = os.environ.get("MACBROW_STT_MODEL", "mlx-community/parakeet-tdt-0.6b-v2")
+LOCAL_TTS_MODEL = os.environ.get("MACBROW_TTS_MODEL", "mlx-community/Kokoro-82M-bf16")
+LOCAL_VOICE = os.environ.get("MACBROW_VOICE", "af_heart")
+
+
+def build_speech() -> tuple[agents.stt.STT, agents.tts.TTS]:
+    if SPEECH_PROVIDER == "gradium":
+        return (
+            gradium.STT(
+                model_name=os.environ.get("GRADIUM_STT_MODEL", "default"), language=os.environ.get("MACBROW_LANG", "en")
+            ),
+            gradium.TTS(
+                model_name=os.environ.get("GRADIUM_TTS_MODEL", "default"),
+                voice_id=os.environ.get("GRADIUM_VOICE_ID") or None,
+            ),
+        )
+    # Non-streaming: AgentSession segments the mic with Silero VAD and sends each utterance.
+    return (
+        lk_openai.STT(
+            model=LOCAL_STT_MODEL,
+            language=os.environ.get("MACBROW_LANG", "en"),
+            base_url=LOCAL_SPEECH_URL,
+            api_key="local",
+            use_realtime=False,
+        ),
+        lk_openai.TTS(
+            model=LOCAL_TTS_MODEL, voice=LOCAL_VOICE, base_url=LOCAL_SPEECH_URL, api_key="local", response_format="pcm"
+        ),
+    )
 
 
 def build_chat_llm() -> llm.LLM:
@@ -161,12 +256,11 @@ class MacBrowAgent(Agent):
         if not text.strip():
             raise StopResponse()
 
-        # Show HUD with user text and start loading.
-        self.hud.show()
-        self.hud.set_text(text)
-        self.hud.loading()
-
-        outcome = await self.mac.handle(text)
+        # Show HUD with user text and start loading. It stays up while the turn runs.
+        with self.hud.busy():
+            self.hud.set_text(text)
+            self.hud.loading()
+            outcome = await self.mac.handle(text)
         r = outcome.route
         log.info(
             "turn %r -> %s timings=%s",
@@ -176,10 +270,9 @@ class MacBrowAgent(Agent):
         )
         if outcome.handoff_to_llm:
             self.hud.done()
-            self.hud.hide(delay=1.0)
             return  # normal LLM reply
 
-        if outcome.stop:
+        if outcome.stop:  # the user explicitly ended the session: close now, not after the idle wait
             self.hud.done()
             self.hud.set_response(outcome.speak or "Goodbye.")
             self.hud.hide(delay=2.0)
@@ -193,14 +286,11 @@ class MacBrowAgent(Agent):
         self.hud.done()
         if outcome.speak:
             self.hud.set_response(outcome.speak)
-            self.hud.hide(delay=3.0)
             # Speak the deterministic result and keep it in history so the LLM has context later.
             try:
                 self.session.say(outcome.speak, add_to_chat_ctx=True)
             except RuntimeError as e:  # session closing mid-turn (ctrl-c during a route)
                 log.warning("could not speak result: %s", e)
-        else:
-            self.hud.hide(delay=1.5)
         raise StopResponse()
 
 
@@ -229,17 +319,18 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     )
     await mac.start()
 
+    stt, tts = build_speech()
     session = AgentSession(
-        stt=gradium.STT(
-            model_name=os.environ.get("GRADIUM_STT_MODEL", "default"), language=os.environ.get("MACBROW_LANG", "en")
-        ),
+        stt=stt,
         llm=build_chat_llm(),
-        tts=gradium.TTS(
-            model_name=os.environ.get("GRADIUM_TTS_MODEL", "default"),
-            voice_id=os.environ.get("GRADIUM_VOICE_ID") or None,
-        ),
+        tts=tts,
         vad=silero.VAD.load(),
-        preemptive_generation=False,  # we decide per-turn whether the LLM runs at all
+        turn_handling={
+            "preemptive_generation": {"enabled": False},  # we decide per-turn whether the LLM runs at all
+            # On laptop speakers the mic hears our own TTS and routes it as a command. Make agent speech
+            # uninterruptible so the mic feeds silence to STT while we talk (discard_audio_if_uninterruptible).
+            "interruption": {"enabled": False},
+        },
     )
 
     # Wire up real-time transcript updates to the HUD.
@@ -248,6 +339,17 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if ev.transcript.strip():
             hud.show()
             hud.set_text(ev.transcript)
+            if ev.is_final:
+                hud.transcript_arrived()
+
+    # Keep the HUD alive while anyone is talking or the agent is working.
+    @session.on("user_state_changed")
+    def _on_user_state(ev):
+        hud.user_speaking(ev.new_state == "speaking")
+
+    @session.on("agent_state_changed")
+    def _on_agent_state(ev):
+        hud.agent_active(ev.new_state in ("thinking", "speaking"))
 
     async def _close() -> None:
         await hud.close()
@@ -256,10 +358,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     ctx.add_shutdown_callback(_close)
 
     log.info(
-        "pipeline: stt=%s tts=%s voice_id=%s llm=%s",
+        "pipeline: speech=%s stt=%s tts=%s voice=%s llm=%s",
+        SPEECH_PROVIDER,
         type(session.stt).__name__ if session.stt else None,
         f"{type(session.tts).__module__}.{type(session.tts).__name__}" if session.tts else None,
-        os.environ.get("GRADIUM_VOICE_ID") or "gradium default",
+        (os.environ.get("GRADIUM_VOICE_ID") or "gradium default") if SPEECH_PROVIDER == "gradium" else LOCAL_VOICE,
         LLM_PROVIDER,
     )
     await session.start(agent=MacBrowAgent(mac, hud), room=ctx.room)
@@ -270,7 +373,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     hud.show()
     hud.set_text("macbrow ready")
     hud.set_response("Listening for commands…")
-    hud.hide(delay=2.8)
+    hud.agent_active(False)  # start the silence countdown (the greeting's speech state extends it)
 
 
 if __name__ == "__main__":

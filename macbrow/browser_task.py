@@ -315,6 +315,20 @@ def tab_exists(target_id: str | None) -> bool:
         return False
 
 
+def target_for_url(url: str) -> str | None:
+    """CDP target id of an open page showing ``url`` (the tab the user is looking at), if any."""
+    if not url.startswith("http"):
+        return None
+    try:
+        pages = [t for t in _cdp()("Target.getTargets").get("targetInfos", []) if t.get("type") == "page"]
+    except Exception:
+        return None
+    for t in pages:
+        if t.get("url", "").rstrip("/") == url.rstrip("/"):
+            return t.get("targetId")
+    return None
+
+
 def _cdp():
     from browser_harness.helpers import cdp
 

@@ -27,7 +27,8 @@ from typesafe_sdk import AsyncTypeSafeClient, Choice, Noul
 
 from . import policy
 from .applescript import MacContext
-from .registry import BUILTIN_PLACEHOLDERS, RISKY_PATTERNS, ArgSpec, PolicyError, Tool, ToolRegistry
+from .focus import app_dictionary
+from .registry import BUILTIN_PLACEHOLDERS, MOVES_PATTERNS, RISKY_PATTERNS, ArgSpec, PolicyError, Tool, ToolRegistry
 
 log = logging.getLogger("macbrow.generator")
 
@@ -103,13 +104,18 @@ TOOL_RESPONSE_FORMAT: dict[str, Any] = llm_utils.to_openai_response_format(Gener
 SYSTEM = """You write a NEW AppleScript tool for a voice-controlled macOS assistant.
 
 You receive the user's spoken request, the app in front, the running apps, and the names of
-tools that ALREADY exist. Your job is to create one tool that does NOT exist yet and that
+tools that ALREADY exist. You may also receive `open_in_frontmost_app` (the note, tab, folder or
+document the user is working on right now) and `target_app` with `target_app_dictionary` (the commands and
+properties that app's AppleScript dictionary really has). Your job is to create one tool that does NOT exist yet and that
 fulfils the request. The existing list is only there so you pick a different, non-clashing
 tool_name; it is never a reason to say the request is infeasible.
 
 Rules:
 - Set feasible=true whenever AppleScript (optionally with `do shell script`) can plausibly do it. Only set feasible=false for things macOS truly cannot do this way (e.g. sending money, reading another user's files) and explain in one spoken sentence.
+- When `target_app_dictionary` is given and the request is about `target_app`, build the script only from the commands, classes and properties listed there; (r/o) properties cannot be set.
+- Requests about "this"/"the current" note, tab, document or folder, or that name no target at all ("write ...", "make it bold"), act on the object that is open. Use the built-in placeholders {{focus_id}} (its id, URL or POSIX path) and {{focus_name}} (its name/title) inside double quotes; they are filled by the system, so never declare them as args. They can be "" when nothing is open, so handle that (for example fall back to the app's `selection`, or return a sentence asking the user to open one), e.g. for Notes: `set n to note id "{{focus_id}}"`.
 - Prefer the app's scripting dictionary (`tell application "X"`). If the app has no dictionary, fall back to `do shell script` (e.g. `defaults write`, `open`, `osascript`-free CLI tools) or System Events GUI scripting as a last resort.
+- Stay where the user is: act inside the app/page that is open without `activate`, `reveal`, `show`, new windows or new tabs, unless the request itself is to open or go to that app, window, page or item. An app's dictionary commands work while it stays in the background.
 - Implement exactly the requested action and nothing more: no extra modes, no unrelated toggles, no GUI clicking when a direct command exists. Short scripts (under 15 lines) are best.
 - Handy direct commands: System Settings panes open with `do shell script "open 'x-apple.systempreferences:com.apple.<pane>'"` (e.g. com.apple.wifi-settings-extension, com.apple.Bluetooth-Settings.extension, com.apple.Sound-Settings.extension, com.apple.Displays-Settings.extension); Wi-Fi power is `networksetup -setairportpower Wi-Fi on|off`; Dock/Finder settings via `defaults write` then `killall Dock` / `killall Finder`; the frontmost app via `tell application "System Events" to get name of first application process whose frontmost is true`.
 - Google Chrome: never use `tell application "Google Chrome"` to open URLs or windows (it lands in the wrong profile). Always launch through the shell with the built-in placeholder {{chrome_profile}} (not an arg):
@@ -173,15 +179,23 @@ class ToolGenerator:
         If the generated tool duplicates an existing available one, that existing tool is
         returned instead with message == DUPLICATE and nothing new is registered.
         """
-        user = "Create a NEW tool for this request.\n" + json.dumps(
-            {
-                "request": utterance,
-                "frontmost_app": ctx.active_app,
-                "running_apps": ctx.running_apps,
-                "existing_tool_names_to_avoid": [t.name for t in self.registry.tools.values()],
-            },
-            ensure_ascii=False,
-        )
+        info: dict[str, Any] = {
+            "request": utterance,
+            "frontmost_app": ctx.active_app,
+            "running_apps": ctx.running_apps,
+            "existing_tool_names_to_avoid": [t.name for t in self.registry.tools.values()],
+        }
+        if ctx.focus:
+            info["open_in_frontmost_app"] = ctx.focus.describe()
+        # The app the request names ("... in Spotify"), else the one in front.
+        said = utterance.lower()
+        named = [a for a in (*ctx.running_apps, *ctx.installed_apps) if len(a) > 2 and a.lower() in said]
+        target = max(named, key=len) if named else ctx.active_app
+        dictionary = app_dictionary(target)
+        if dictionary:
+            info["target_app"] = target
+            info["target_app_dictionary"] = dictionary
+        user = "Create a NEW tool for this request.\n" + json.dumps(info, ensure_ascii=False)
         messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
         last_error = ""
         policy_strikes = 0
@@ -399,6 +413,7 @@ class ToolGenerator:
             ],
             speak=data.get("speak") or "done",
             risky=bool(RISKY_PATTERNS.search(data["script"])),
+            moves=bool(MOVES_PATTERNS.search(data["script"])),
             source="learned",
             examples=list(data.get("examples", [])),
         )

@@ -25,6 +25,7 @@ log = logging.getLogger("macbrow.router")
 CHAT = "chat"
 NEW_ACTION = "new_action"
 STOP = "stop_listening"
+LEAVE = "leave_current_app"  # offered when re-routing among in-place tools only
 
 MIN_TOOL_CONFIDENCE = 0.45  # below this we treat the pick as uncertain
 NEW_ACTION_MIN_CONFIDENCE = 0.6  # hesitant new_action -> ask about the best existing tool instead
@@ -34,7 +35,7 @@ MAX_TEXT_CANDIDATES = 200  # Jev Choice allows 255 options
 
 @dataclass
 class Route:
-    kind: str  # "tool" | "chat" | "new_action" | "uncertain" | "stop"
+    kind: str  # "tool" | "chat" | "new_action" | "uncertain" | "stop" | "leave"
     tool: Tool | None = None
     args: dict[str, str] = field(default_factory=dict)
     confidence: float = 0.0
@@ -45,6 +46,7 @@ class Route:
     web_goal_complete: float = 1.0  # p(request has the concrete details a website form needs)
     web_goal_forbidden: float = 0.0  # p(request requires buying/paying/signing in/changing an account)
     web_goal_missing: str = "nothing"  # what a clarifying question should ask for
+    explicit_move: float = 1.0  # p(user explicitly asked to go to another app/page); 1.0 when not asked
     latency_ms: float = 0.0
     weakest_arg: tuple[str, float] | None = None
 
@@ -64,6 +66,10 @@ def _state(utterance: str, ctx: MacContext, recent_browser: dict[str, str] | Non
         "frontmost_app": ctx.active_app,
         "running_apps": ctx.running_apps,
     }
+    if ctx.focus:
+        st["open_in_frontmost_app"] = ctx.focus.describe()
+    if ctx.recent:
+        st["recently_worked_on"] = [f.describe() for f in ctx.recent]
     if recent_browser:
         st["recent_browser_task"] = recent_browser
     return st
@@ -89,12 +95,23 @@ class JevRouter:
         *,
         awaiting_confirmation: bool = False,
         recent_browser: dict[str, str] | None = None,
+        exclude: frozenset[str] | set[str] = frozenset(),
+        offer_leave: bool = False,
     ) -> Route:
+        """``exclude`` drops tools from the Choice; ``offer_leave`` adds an option meaning "nothing
+        in-place fits, this needs another app or page" (route.kind "leave")."""
         t0 = time.perf_counter()
-        tools = self.registry.available(ctx)
+        tools = [t for t in self.registry.available(ctx) if t.name not in exclude]
+        front = ctx.active_app.lower()
+        tools.sort(key=lambda t: (t.scope or "").lower() != front)  # the app in front first; stable otherwise
         criteria: dict[str, Any] = {}
-        for t in tools[: MAX_CHOICE_OPTIONS - 2]:
-            criteria[t.name] = t.choice_description()
+        for t in tools[: MAX_CHOICE_OPTIONS - 4]:
+            desc = t.choice_description()
+            if t.scope and t.scope.lower() == front:
+                desc["app_is_in_front"] = True
+            if t.moves or t.runner == "browser":
+                desc["takes_user_elsewhere"] = True  # opens/switches to another app, page, tab or item
+            criteria[t.name] = desc
         criteria[CHAT] = {
             "what": "The user is chatting, asking a general question, or thinking aloud; "
             "they are not asking the assistant to do something on the Mac.",
@@ -117,12 +134,28 @@ class JevRouter:
             "that none of the listed tools can do.",
             "not_for": "Requests a listed tool already covers, even if worded differently.",
         }
+        if offer_leave:
+            criteria[LEAVE] = {
+                "what": "None of the listed tools can do this inside the app or page that is open now; it "
+                "needs another app, website or page (e.g. playing a video while on a shopping site).",
+            }
 
         questions: dict[str, Any] = {
             "intent": Choice(
                 instructions=(
                     "The user spoke `utterance` to a voice assistant that controls this Mac. "
                     "`frontmost_app` is the app currently in focus and `running_apps` are open. "
+                    "`open_in_frontmost_app` is what the user is working on right now (the note, tab, folder, "
+                    "document or message open there); `recently_worked_on` is what was open in other apps "
+                    "they used a moment ago. The user works with apps continuously and rarely repeats the "
+                    "app's name: a request that names no app ('write buy milk', 'add a line', 'read it back', "
+                    "'close this') acts on `open_in_frontmost_app`, so pick the tool that works on it; one that "
+                    "names something in `recently_worked_on` ('in my note', 'on that page') acts on that. "
+                    "Stay in the current app: a generic command that names no other app or website ('search "
+                    "for X', 'type X', 'go back', 'scroll down', 'next one') happens INSIDE `frontmost_app`, on "
+                    "the site or item open there, so pick a tool that works in place (search_here, type_here, "
+                    "app_action, or a tool with app_is_in_front) and never one that opens a new tab, a new site "
+                    "or another app. Only switch apps or sites when the user names them. "
                     "Which tool best fulfils the request? Prefer a tool scoped to `frontmost_app` "
                     "when the request is ambiguous between apps. A website, URL, or web search "
                     "goes to a browser tool, not to opening an application. Closing, switching or reloading "
@@ -143,13 +176,28 @@ class JevRouter:
                     instructions=[
                         f"Assume the user wants to run the tool '{t.name}' ({t.description}).",
                         spec.instructions,
-                        "Base the answer on `utterance`; use `frontmost_app` when the user says "
-                        "'this app' or leaves the target implicit.",
+                        "Base the answer on `utterance`; use `frontmost_app` and `open_in_frontmost_app` "
+                        "when the user says 'this app' or leaves the target implicit.",
                     ],
                     criteria=crit,
                 )
         if any(t.runner == "browser" for t in tools):
             questions.update(_web_goal_questions())
+        questions["explicit_move"] = Noul(
+            instructions=(
+                "The user is in `frontmost_app` (on `open_in_frontmost_app`). Does `utterance` EXPLICITLY ask "
+                "to go somewhere else: open, go to, switch to or start a different app, website, page, "
+                "file, folder, note, tab or window, by naming it or saying 'open', 'go to', 'switch to', "
+                "'new tab', 'new window'? A command that only says what to do ('search for X', 'play X', "
+                "'type X', 'find X', 'add X', 'scroll down') without naming a different place is NOT explicit."
+            ),
+            criteria={
+                "true": "'open Spotify', 'go to github', 'play espresso on YouTube', 'open my shopping note', "
+                "'switch to Slack', 'new tab', 'search Amazon for earbuds' while on YouTube",
+                "false": "'search for espresso', 'play espresso', 'type hello', 'find the invoice', "
+                "'add milk', 'go back', 'what's this page'",
+            },
+        )
         if recent_browser:
             questions["browser_followup"] = Noul(
                 instructions=(
@@ -186,6 +234,7 @@ class JevRouter:
             route.web_goal_missing = resp.choices["web_goal_missing"].choice
         if recent_browser:
             route.browser_followup = float(resp.nouls["browser_followup"].noul)
+        route.explicit_move = float(resp.nouls["explicit_move"].noul)
         if awaiting_confirmation:
             route.is_confirmation = float(resp.nouls["confirm"].noul)
             route.is_denial = float(resp.nouls["deny"].noul)
@@ -195,20 +244,26 @@ class JevRouter:
             route.kind = "chat"
         elif picked == STOP:
             route.kind = "stop"
+        elif picked == LEAVE:
+            route.kind = "leave"
         elif picked == NEW_ACTION:
             route.kind = "new_action"
             # A hesitant new_action with a plausible existing tool is a question, not a codegen trigger.
             if intent.confidence < NEW_ACTION_MIN_CONFIDENCE:
-                best = max(
-                    ((k, v) for k, v in intent.probabilities.items() if k not in (CHAT, NEW_ACTION, STOP)),
-                    key=lambda kv: kv[1],
-                    default=None,
-                )
+                best = (
+                    max(
+                        ((k, v) for k, v in intent.probabilities.items() if k not in (CHAT, NEW_ACTION, STOP)),
+                        key=lambda kv: kv[1],
+                        default=None,
+                    )
+                    if not offer_leave
+                    else None
+                )  # re-routing in place: a weak pick is not a question
                 if best and best[1] >= UNCERTAIN_TOOL_MIN_PROB and (tool := self.registry.get(best[0])):
                     picked = tool.name
                     route.kind = "uncertain"
                     route.tool = tool
-        if picked not in (CHAT, NEW_ACTION, STOP):
+        if picked not in (CHAT, NEW_ACTION, STOP, LEAVE):
             tool = self.registry.get(picked)
             if tool is None:
                 route.kind = "new_action"
@@ -236,11 +291,13 @@ class JevRouter:
 
         route.latency_ms = (time.perf_counter() - t0) * 1000
         log.info(
-            "route %s conf=%.2f %.0fms probs=%s",
+            "route %s conf=%.2f %.0fms probs=%s front=%s focus=%s",
             route.summary,
             route.confidence,
             route.latency_ms,
             _top(route.probabilities),
+            ctx.active_app,
+            ctx.focus.describe() if ctx.focus else None,
         )
         return route
 
@@ -276,6 +333,9 @@ class JevRouter:
         resp = await self.client.system_one(state=_state(utterance, ctx), questions=questions)
         for spec in specs:
             ans = resp.choices[spec.name]
+            if ans.choice == "__none__" and spec.optional:
+                route.args[spec.name] = spec.default or ""
+                continue  # leaving an optional slot empty is never a reason to ask back
             value = ans.choice if ans.choice != "__none__" else (spec.default or utterance)
             route.args[spec.name] = _clean_value(value)
             if route.weakest_arg is None or ans.confidence < route.weakest_arg[1]:

@@ -10,9 +10,14 @@ Each tool declares:
 - ``args``: argument slots. ``enum`` slots become Jev Choice questions with fixed
   criteria (or ``"dynamic": "running_apps" | "installed_apps"`` to fill criteria
   from the live environment). ``text`` slots are filled by span selection.
-- ``script``: AppleScript with ``{{arg_name}}`` placeholders.
+- ``script``: AppleScript with ``{{arg_name}}`` placeholders. The built-ins ``{{focus_id}}`` and
+  ``{{focus_name}}`` are the object open in the tool's app (see focus.py), "" when none.
 - ``speak``: ``"done"`` (confirm), ``"result"`` (read the script output aloud), or a
   template string containing ``{result}``.
+- ``moves``: the tool takes the user out of the app/page they are on (switches apps, opens a
+  window, tab or other item). Such tools only run when the user explicitly asked to go there;
+  see ``DynamicMacAgent._stay_in_place``. Detected from the script when not declared.
+  ``stays_on`` (a host such as "youtube.com") marks a mover that works in place on that site.
 """
 
 from __future__ import annotations
@@ -26,13 +31,16 @@ from typing import Any, Literal
 
 from . import chrome, policy
 from .applescript import MacContext, escape_applescript_string
+from .focus import Focus
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 SEED_PATH = TOOLS_DIR / "seed.json"
 LEARNED_PATH = TOOLS_DIR / "learned.json"
 
 MAX_CHOICE_OPTIONS = 255  # Jev Choice limit
-BUILTIN_PLACEHOLDERS = {"chrome_profile", "chrome_home"}  # filled by chrome.system_vars(), never by Jev
+FOCUS_PLACEHOLDERS = {"focus_id", "focus_name"}  # the open note/tab/folder, filled from the context
+# filled by the system (chrome.system_vars() or the focus), never by Jev
+BUILTIN_PLACEHOLDERS = {"chrome_profile", "chrome_home"} | FOCUS_PLACEHOLDERS
 
 ArgKind = Literal["enum", "text"]
 DynamicSource = Literal["running_apps", "installed_apps", "apps"]
@@ -48,6 +56,14 @@ RISKY_PATTERNS = re.compile(
 )
 
 
+# Script constructs that bring another app forward or open a new window/tab/item.
+MOVES_PATTERNS = re.compile(
+    r"(\bactivate\b|open location|open\s+-n?a\b|make new (window|tab|document)|\breveal\b|\bshow\b|"
+    r"set frontmost\b|set index of window)",
+    re.IGNORECASE,
+)
+
+
 @dataclass
 class ArgSpec:
     name: str
@@ -56,6 +72,7 @@ class ArgSpec:
     criteria: dict[str, str | None] = field(default_factory=dict)
     dynamic: DynamicSource | None = None
     default: str | None = None
+    optional: bool = False  # text slot the user may leave out: empty instead of the whole utterance
 
     def resolve_criteria(self, ctx: MacContext) -> dict[str, str | None]:
         if self.dynamic == "running_apps":
@@ -83,6 +100,8 @@ class Tool:
     verified: float | None = None  # Jev's p(script works), set for learned tools
     computed: dict[str, dict[str, str]] = field(default_factory=dict)  # {{name}} <- resolvers.run(fn, args[from])
     runner: str = "applescript"  # "applescript" | "browser" (jev-ultrafast web task; script unused)
+    moves: bool = False  # takes the user to another app/page (see module docstring)
+    stays_on: str | None = None  # ...except when the page in front is on this host
 
     @property
     def blocked_by(self) -> list[str]:
@@ -101,8 +120,10 @@ class Tool:
             return True
         return self.scope.lower() in {a.lower() for a in ctx.running_apps}
 
-    def render(self, args: dict[str, str]) -> str:
+    def render(self, args: dict[str, str], focus: Focus | None = None) -> str:
         script = self.script
+        script = script.replace("{{focus_id}}", escape_applescript_string(focus.id if focus else ""))
+        script = script.replace("{{focus_name}}", escape_applescript_string(focus.name if focus else ""))
         for spec in self.args:
             value = args.get(spec.name, spec.default or "")
             script = script.replace("{{" + spec.name + "}}", escape_applescript_string(value))
@@ -133,13 +154,19 @@ class Tool:
             scope=d.get("scope"),
             args=args,
             speak=d.get("speak", "done"),
-            risky=bool(d.get("risky", False)) or bool(RISKY_PATTERNS.search(d["script"])),
+            # Hand-written seed tools may declare "risky": false (e.g. typing a search query); for
+            # anything else the pattern check decides as well.
+            risky=bool(d["risky"])
+            if source == "seed" and "risky" in d
+            else bool(d.get("risky", False)) or bool(RISKY_PATTERNS.search(d["script"])),
             source=source,  # type: ignore[arg-type]
             examples=list(d.get("examples", [])),
             not_for=d.get("not_for"),
             verified=d.get("verified"),
             computed=dict(d.get("computed") or {}),
             runner=d.get("runner", "applescript"),
+            moves=bool(d["moves"]) if "moves" in d else bool(MOVES_PATTERNS.search(d["script"])),
+            stays_on=d.get("stays_on"),
         )
 
     def to_dict(self) -> dict[str, Any]:
