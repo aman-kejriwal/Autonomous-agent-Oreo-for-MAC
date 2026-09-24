@@ -19,7 +19,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from . import browser_task, policy, resolvers
+from typesafe_sdk import Choice
+
+from . import browser_task, policy, resolvers, ui
 from .applescript import ContextPoller, run_applescript
 from .focus import probed_apps
 from .generator import DUPLICATE, ToolGenerator
@@ -37,6 +39,9 @@ BROWSER_MEMORY_S = 15 * 60  # how long a finished browser task stays "recent" fo
 ARG_CONFIDENCE_FLOOR = 0.35  # weakest argument below this -> ask instead of act
 EXPLICIT_THRESHOLD = 0.5  # p(user named another app/page) below which commands stay with the front one
 STAY_ALT_MIN_CONFIDENCE = 0.7  # an in-place substitute must be at least this sure, else we ask
+UI_PRESS_CONFIDENCE = 0.5  # p(this on-screen element is what the user meant) to press it right away
+UI_ASK_CONFIDENCE = 0.25  # between the two: ask "did you mean X?"; below: say it isn't there
+UI_FALLBACK_CONFIDENCE = 0.6  # before writing a new tool, press an element this clearly meant
 BROWSERS = {"google chrome", "safari"}
 
 
@@ -126,6 +131,9 @@ class DynamicMacAgent:
         t0 = time.perf_counter()
         ctx = await self.context.latest()
         self._remember_listing(ctx)
+        # Read the front app's controls while Jev routes (~0.3-1 s, local); used only if the turn
+        # ends up pressing something on screen.
+        self._ui_prefetch = self._start_ui_snapshot(ctx)
         t_ctx = time.perf_counter()
 
         recent = self._recent_browser()
@@ -280,7 +288,11 @@ class DynamicMacAgent:
             await self._execute(route.tool, route.args, outcome, utterance=utterance)
             return outcome
 
-        # new_action -> heavy tier
+        # new_action: first, is it simply something on screen in the front app ("open liked songs")?
+        if await self._press_on_screen(utterance, ctx, outcome, min_confidence=UI_FALLBACK_CONFIDENCE):
+            return outcome
+
+        # -> heavy tier
         if self.generator is None:
             outcome.speak = "I don't have a tool for that yet."
             return outcome
@@ -555,6 +567,109 @@ class DynamicMacAgent:
         outcome.speak = f"That would take you out of {_place(ctx)}. Should I {_say_tool(tool)}?"
         return route
 
+    # ------------------------------------------------------------- on-screen controls
+    def _start_ui_snapshot(self, ctx) -> asyncio.Task | None:
+        app = ctx.active_app
+        if not app or app.lower() in policy.BLOCKED_APPS or app.lower() in BROWSERS:
+            return None  # web pages have their own tools and huge trees; blocked apps stay untouched
+        return asyncio.ensure_future(asyncio.to_thread(ui.snapshot, app))
+
+    async def _ui_snapshot(self, ctx) -> ui.Snapshot | None:
+        task = getattr(self, "_ui_prefetch", None)
+        snap = None
+        if task is not None:
+            try:
+                snap = await task
+            except Exception:
+                log.exception("ui snapshot failed")
+        if snap is None or snap.app != ctx.active_app:
+            if ctx.active_app.lower() in policy.BLOCKED_APPS:
+                return None
+            try:
+                snap = await asyncio.to_thread(ui.snapshot, ctx.active_app)
+            except Exception:
+                log.exception("ui snapshot failed")
+                return None
+        return snap
+
+    async def _press_on_screen(self, utterance: str, ctx, outcome: Outcome, min_confidence: float) -> bool:
+        """Choose the on-screen element of the front app that ``utterance`` means and press it.
+        True when the turn is handled (pressed, or a question asked)."""
+        snap = await self._ui_snapshot(ctx)
+        if snap is None or not snap.elements:
+            return False
+        t0 = time.perf_counter()
+        crit, by_key = ui.choice_criteria(ui.candidates(snap, utterance))
+        crit["__none__"] = "None of these elements does what the user asked"
+        resp = await self.router.client.system_one(
+            state={"utterance": utterance, "app": snap.app, "window": snap.window},
+            questions={
+                "pick": Choice(
+                    instructions=[
+                        "The user said `utterance` to a voice assistant while `app` is in front.",
+                        "Which on-screen element of the app should be pressed to do it? Each option is a real "
+                        "element; its description says what kind it is and which section it sits in.",
+                        "Choose __none__ if no element does it.",
+                    ],
+                    criteria=crit,
+                )
+            },
+        )
+        ans = resp.choices["pick"]
+        el = by_key.get(ans.choice)
+        conf = ui.pick_confidence(ans.choice, ans.probabilities) if el else 0.0
+        outcome.timings["ui_ms"] = (time.perf_counter() - t0) * 1e3 + snap.elapsed_ms
+        log.info(
+            "ui pick in %s (%d elements, %.0fms read): %r conf=%.2f",
+            snap.app,
+            len(snap.elements),
+            snap.elapsed_ms,
+            el.describe() if el else ans.choice,
+            conf,
+        )
+        if el is None or conf < min(min_confidence, UI_ASK_CONFIDENCE):
+            return False
+        pressable = ui.press_args(el)
+        if el.dangerous:
+            self._stage(self.registry.get("ui_press"), pressable, utterance)
+            outcome.speak = f"That would press {el.label} in {snap.app}. Should I?"
+            return True
+        if conf < min_confidence:
+            if min_confidence > UI_PRESS_CONFIDENCE:
+                return False  # fallback tier: not sure enough to claim it; let codegen try
+            self._stage(self.registry.get("ui_press"), pressable, utterance)
+            outcome.speak = f"Did you mean {el.label}" + (f" in {el.where}?" if el.where else "?")
+            return True
+        return await self._press(el, snap, ctx, outcome)
+
+    async def _press_confirmed(self, args: dict[str, str], ctx, outcome: Outcome) -> None:
+        snap = await self._ui_snapshot(ctx)
+        el = ui.find(snap, args) if snap else None
+        if el is None:
+            outcome.speak = f"{args['label']} isn't on screen anymore."
+            return
+        await self._press(el, snap, ctx, outcome)
+
+    async def _press(self, el: ui.Element, snap: ui.Snapshot, ctx, outcome: Outcome) -> bool:
+        """Press and check that the window actually changed; never report a press that did nothing."""
+        t0 = time.perf_counter()
+        how = await asyncio.to_thread(
+            ui.press_verified,
+            el,
+            snap.app,
+            ui.window_fingerprint(snap),
+            ctx.active_app == snap.app,  # a real click only when the app is in front (not covered)
+        )
+        outcome.timings["press_ms"] = (time.perf_counter() - t0) * 1e3
+        outcome.executed = how is not None
+        log.info("ui press %r in %s -> %s", el.label, snap.app, how or "no visible change")
+        await self.context.refresh()
+        if how is None:
+            outcome.speak = f"Nothing changed after pressing {el.label}. It may already be open."
+            return True
+        outcome.speak = f"Done: {el.label}." if el.in_menu else f"Opened {el.label}."
+        return True
+
     # --------------------------------------------------------------- result lists
     def _remember_listing(self, ctx) -> None:
         f = ctx.focus
@@ -605,6 +720,13 @@ class DynamicMacAgent:
     ) -> None:
         if tool.runner == "browser":
             await self._execute_browser(tool, args, outcome, utterance)
+            return
+        if tool.runner == "ui":
+            ctx = await self.context.latest()
+            if args.get("label"):  # confirmed earlier: press that exact element
+                await self._press_confirmed(args, ctx, outcome)
+            elif not await self._press_on_screen(utterance, ctx, outcome, min_confidence=UI_PRESS_CONFIDENCE):
+                outcome.speak = outcome.speak or f"I can't find that in {ctx.active_app}."
             return
         ctx = await self.context.latest()
         focus = ctx.focus_in(tool.scope or ctx.active_app)

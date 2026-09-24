@@ -240,6 +240,25 @@
     }
   },
   {
+    "name": "ui_press",
+    "description": "Open, select or press something by its name inside the app in front, using the app's real on-screen controls: a sidebar or library item, playlist, section, tab, list entry, button or menu command (Liked Songs in Spotify, Inbox in Mail, Settings, New Playlist).",
+    "scope": null,
+    "runner": "ui",
+    "args": [],
+    "script": "",
+    "speak": "result",
+    "risky": false,
+    "moves": false,
+    "examples": [
+      "open the liked songs",
+      "go to my Pasoori playlist",
+      "open settings",
+      "show my episodes",
+      "click the create button"
+    ],
+    "not_for": "Web pages in Chrome or Safari (search_here, open_result, web_task); opening another app (open_app); typing text (type_here)."
+  },
+  {
     "name": "toggle_dark_mode",
     "description": "Toggle macOS dark mode on or off.",
     "scope": null,

@@ -37,6 +37,7 @@ ALLOWED_SEED = {
     "open_result",
     "type_here",
     "app_action",
+    "ui_press",
     "music_play_pause",
     "music_next",
     "music_now_playing",

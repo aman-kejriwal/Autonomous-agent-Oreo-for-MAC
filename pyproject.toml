@@ -6,6 +6,8 @@ dependencies = [
     "jev-ultrafast",
     "livekit-agents[gradium,openai,silero]~=1.8",
     "openai>=1.60",
+    "pyobjc-framework-applicationservices>=11",
+    "pyobjc-framework-cocoa>=11",
     "python-dotenv>=1.2.3",
     "typesafe-sdk>=0.7",
 ]

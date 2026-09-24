@@ -72,6 +72,15 @@ macbrow inverts this. Code owns the workflow and hands Jev small, typed question
   current tab). If none clearly fits, a background-only action still runs (you stay put), and
   leaving is asked first: "That would take you out of this page. Should I...?"
 
+- **It can use any app's own buttons.** "Open liked songs" with Spotify in front: macbrow reads
+  the app's on-screen controls through macOS accessibility, each with the sections it sits in
+  ("Your Library > Liked Songs") plus the app's menu commands, and Jev *chooses* one in a single
+  request ([`macbrow/ui.py`](macbrow/ui.py)). The window is read while Jev routes, so it costs
+  no extra round-trip. The press is verified: if the window didn't change it tries the button
+  inside the row, then a real click, and otherwise says nothing happened instead of "done".
+  Buttons like Delete, Send, Log Out or Buy always need a spoken yes. The same pick runs before
+  the LLM is asked to write a new tool, so most "open X in this app" requests never need one.
+
 Measured on this machine: "add the best vacuum cleaner to my Amazon cart" completed in 4
 steps and 11 s; "the return date should be November 4th" as a follow-up in the same tab, 6
 steps and 3.7 s; "play the Love Hypothesis trailer" from end of speech to video playing,
@@ -142,6 +151,8 @@ and the greeting says so out loud.
 | [`macbrow/generator.py`](macbrow/generator.py) | LLM writes a new tool: compile, effect, policy and Jev-review gates, 3 repair rounds |
 | [`macbrow/browser_task.py`](macbrow/browser_task.py) | jev-ultrafast in the user's Chrome: pinned profile, follow-ups, clarifying questions, spoken results |
 | [`macbrow/policy.py`](macbrow/policy.py) | The safety policy |
+| [`macbrow/ui.py`](macbrow/ui.py) | The front app's on-screen controls (accessibility), Jev picks one, verified press |
+| [`macbrow/focus.py`](macbrow/focus.py) | What is open in the front app (note, tab, folder...) and apps' AppleScript dictionaries |
 | [`macbrow/chrome.py`](macbrow/chrome.py), [`resolvers.py`](macbrow/resolvers.py), [`applescript.py`](macbrow/applescript.py), [`cli.py`](macbrow/cli.py) | Profile lookup, computed args, osascript, text REPL |
 
 Add a tool by appending to `tools/seed.json`: a name, description, optional app `scope`,
