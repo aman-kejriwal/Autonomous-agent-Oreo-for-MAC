@@ -35,7 +35,8 @@ FORBIDDEN_THRESHOLD = 0.6  # p(goal requires buying/paying/signing in) at or abo
 ACHIEVED_THRESHOLD = 0.5  # p(final page shows the success criterion); below: one more round, then be honest
 BROWSER_MEMORY_S = 15 * 60  # how long a finished browser task stays "recent" for follow-ups
 ARG_CONFIDENCE_FLOOR = 0.35  # weakest argument below this -> ask instead of act
-EXPLICIT_MOVE_THRESHOLD = 0.5  # p(user asked to go elsewhere) below which a tool may not take them away
+EXPLICIT_THRESHOLD = 0.5  # p(user named another app/page) below which commands stay with the front one
+STAY_ALT_MIN_CONFIDENCE = 0.7  # an in-place substitute must be at least this sure, else we ask
 BROWSERS = {"google chrome", "safari"}
 
 
@@ -103,6 +104,9 @@ class DynamicMacAgent:
         self.context = ContextPoller()
         self.last_browser: dict[str, Any] | None = None  # goal, url, title, target_id, finished_at
         self.last_args: dict[str, dict[str, str]] = {}  # tool name -> last used arguments (for "send her another")
+        # Last results/search page seen per site, so "play the second one" still means the second
+        # search result after the first one was opened: host -> (url, time seen)
+        self.listings: dict[str, tuple[str, float]] = {}
 
     async def start(self) -> None:
         """Warm the context poller (optional; handle() does it lazily)."""
@@ -121,6 +125,7 @@ class DynamicMacAgent:
             return Outcome(handoff_to_llm=False)
         t0 = time.perf_counter()
         ctx = await self.context.latest()
+        self._remember_listing(ctx)
         t_ctx = time.perf_counter()
 
         recent = self._recent_browser()
@@ -489,6 +494,8 @@ class DynamicMacAgent:
         """Would running ``tool`` take the user out of the app/page they are on?"""
         if tool.runner == "browser":
             return (args or {}).get("site") != "current_tab" and not (args is None and _on_web_page(ctx))
+        if tool.moves_args:  # moves only for some argument values (app_action new_tab / next_tab ...)
+            return bool(args) and any(args.get(k) in vals for k, vals in tool.moves_args.items())
         if not tool.moves:
             return False
         if tool.name == "open_app" and args and args.get("app", "").lower() == ctx.active_app.lower():
@@ -496,13 +503,23 @@ class DynamicMacAgent:
         # a mover that works in the page that is open (youtube_play on a YouTube tab) stays
         return not (tool.stays_on and ctx.focus and tool.stays_on in ctx.focus.id)
 
+    @staticmethod
+    def _elsewhere(tool: Tool, ctx) -> bool:
+        """Does ``tool`` act on an app other than the one in front (without moving the user)?"""
+        return bool(tool.scope) and tool.scope.lower() != ctx.active_app.lower()
+
     async def _stay_in_place(self, route: Route, utterance: str, ctx, outcome: Outcome) -> Route:
-        """Default to the app/page in front. A tool that would take the user elsewhere only runs when
-        they explicitly asked to go there; otherwise re-route among in-place tools, and if nothing
-        there fits, ask before leaving."""
+        """Every command is for the app/page/tab in front unless the user names another one.
+
+        A tool that would take the user elsewhere, or act on a background app, only runs as picked
+        when they explicitly pointed there. Otherwise re-route among tools that work in front; if
+        none clearly does it, a background action still runs (the front app can't do it and the user
+        stays put), while moving away is asked first."""
         tool = route.tool
         assert tool is not None
-        if not self._leaves(tool, route.args, ctx) or route.explicit_move >= EXPLICIT_MOVE_THRESHOLD:
+        leaves = self._leaves(tool, route.args, ctx)
+        elsewhere = leaves or self._elsewhere(tool, ctx)
+        if not elsewhere or route.explicit_elsewhere >= EXPLICIT_THRESHOLD:
             return route
         if not _has_place(ctx):
             return route  # nothing open to stay in (bare desktop)
@@ -510,24 +527,50 @@ class DynamicMacAgent:
             log.info("stay: web task continues on the open page instead of %s", route.args.get("site"))
             route.args["site"] = "current_tab"
             return route
-        movers = frozenset(t.name for t in self.registry.available(ctx) if self._leaves(t, None, ctx))
-        alt = await self.router.route(utterance, ctx, exclude=movers, offer_leave=True)
+        away = frozenset(
+            t.name for t in self.registry.available(ctx) if self._leaves(t, None, ctx) or self._elsewhere(t, ctx)
+        )
+        alt = await self.router.route(utterance, ctx, exclude=away, offer_leave=True)
         log.info(
-            "stay: %s would leave %s (explicit=%.2f) -> in place: %s",
+            "stay: %s would %s %s (explicit=%.2f) -> in front: %s",
             tool.name,
+            "leave" if leaves else "act outside",
             ctx.active_app,
-            route.explicit_move,
+            route.explicit_elsewhere,
             alt.summary,
         )
-        if alt.tool is not None and alt.kind in ("tool", "uncertain"):
-            alt.explicit_move = route.explicit_move
+        # Only substitute an in-place tool that clearly does what was asked; a hesitant one could
+        # quietly do less than the user wanted (Cmd-N instead of "a note called groceries").
+        if alt.tool is not None and alt.kind == "tool" and alt.confidence >= STAY_ALT_MIN_CONFIDENCE:
+            alt.explicit_elsewhere = route.explicit_elsewhere
             return alt
-        if alt.kind == "chat":
+        if alt.kind == "chat" and alt.confidence >= STAY_ALT_MIN_CONFIDENCE:
             return alt
+        if not leaves:
+            # Only a background app can do it ("what song is playing" in Notes): do it there, the
+            # user stays where they are.
+            return route
         # Nothing in place does it: say where it would go and wait for a yes.
         self._stage(tool, route.args, utterance)
         outcome.speak = f"That would take you out of {_place(ctx)}. Should I {_say_tool(tool)}?"
         return route
+
+    # --------------------------------------------------------------- result lists
+    def _remember_listing(self, ctx) -> None:
+        f = ctx.focus
+        if f is not None and f.kind == "tab" and _is_listing(f.id):
+            self.listings[_host(f.id)] = (f.id, time.time())
+
+    def _listing_for(self, focus) -> str:
+        """The results page "the Nth one" refers to: the page in front if it is one, else the last
+        results page seen on the same site in the last 15 minutes, else the page in front."""
+        url = focus.id if focus else ""
+        if not url or _is_listing(url):
+            return url
+        seen = self.listings.get(_host(url))
+        if seen and time.time() - seen[1] <= BROWSER_MEMORY_S:
+            return seen[0]
+        return url
 
     def _recent_browser(self) -> dict[str, str] | None:
         lb = self.last_browser
@@ -569,7 +612,9 @@ class DynamicMacAgent:
             args = dict(args)
             t_r = time.perf_counter()
             for name, spec in tool.computed.items():
-                focus_id = (focus.id if focus else "") if spec.get("with_focus") else None
+                focus_id = None
+                if spec.get("with_focus"):
+                    focus_id = self._listing_for(focus) if spec.get("listing") else (focus.id if focus else "")
                 try:
                     args[name] = await resolvers.run(spec["fn"], args.get(spec.get("from", ""), ""), focus_id)
                 except resolvers.ResolveError as e:
@@ -638,6 +683,18 @@ BROWSER_OPENERS: dict[str, Callable[[dict[str, str]], str]] = {
     "safari_open": lambda a: "google",
     "youtube_play": lambda a: "youtube",
 }
+
+
+_LISTING_RE = re.compile(r"(/results\b|/search\b|/s\?|[?&](q|k|query|search_query|keywords|search)=)", re.IGNORECASE)
+
+
+def _is_listing(url: str) -> bool:
+    """A search/results page (YouTube results, Google/Amazon/GitHub search...)."""
+    return url.startswith("http") and bool(_LISTING_RE.search(url))
+
+
+def _host(url: str) -> str:
+    return re.sub(r"^www\.", "", url.split("/")[2].lower()) if url.count("/") >= 2 else ""
 
 
 def _on_web_page(ctx) -> bool:

@@ -110,6 +110,60 @@
     "not_for": "A search on a site or app the user names that is not the one open (chrome_open / open_app first), or playing a specific video right away (youtube_play)."
   },
   {
+    "name": "open_result",
+    "description": "Open or play result number N (the first, second, third...) listed on the page in front, in the same tab: a video in YouTube results, a search result, a product in a list.",
+    "scope": null,
+    "args": [
+      {
+        "name": "position",
+        "kind": "enum",
+        "instructions": "Which result on the page does the user mean?",
+        "criteria": {
+          "1": "The first / top one",
+          "2": "The second one",
+          "3": "The third one",
+          "4": "The fourth one",
+          "5": "The fifth one",
+          "6": "The sixth one",
+          "7": "The seventh one",
+          "8": "The eighth one",
+          "9": "The ninth one",
+          "10": "The tenth one"
+        },
+        "default": "1"
+      }
+    ],
+    "computed": {
+      "result_url": {
+        "fn": "page_result_url",
+        "from": "position",
+        "with_focus": true,
+        "listing": true
+      },
+      "listing": {
+        "fn": "results_page",
+        "from": "position",
+        "with_focus": true,
+        "listing": true
+      },
+      "result_js": {
+        "fn": "result_link_js",
+        "from": "position"
+      }
+    },
+    "script": "set n to \"{{position}}\"\nset u to \"{{result_url}}\"\nset js to \"{{result_js}}\"\nset listing to \"{{listing}}\"\ntell application \"System Events\" to set frontApp to name of first application process whose frontmost is true\nif frontApp is \"Google Chrome\" then\n  if u is \"\" and listing is not \"\" then\n    -- \"the second one\" after opening the first: go back to the results list it refers to\n    tell application \"Google Chrome\"\n      if (URL of active tab of front window) is not listing then\n        set URL of active tab of front window to listing\n        delay 2.5\n      end if\n    end tell\n  end if\n  if u is \"\" then\n    try\n      tell application \"Google Chrome\" to set u to (execute active tab of front window javascript js)\n    on error\n      error \"I can't read this page yet. In Chrome, turn on View, Developer, Allow JavaScript from Apple Events.\"\n    end try\n    if u is missing value then set u to \"\"\n  end if\n  if u is \"\" then error \"I couldn't find result \" & n & \" on this page.\"\n  tell application \"Google Chrome\" to set URL of active tab of front window to u\n  delay 2\n  tell application \"Google Chrome\" to return title of active tab of front window\nelse if frontApp is \"Safari\" then\n  if u is \"\" and listing is not \"\" then\n    -- \"the second one\" after opening the first: go back to the results list it refers to\n    tell application \"Safari\"\n      if (URL of current tab of front window) is not listing then\n        set URL of current tab of front window to listing\n        delay 2.5\n      end if\n    end tell\n  end if\n  if u is \"\" then\n    try\n      tell application \"Safari\" to set u to (do JavaScript js in current tab of front window)\n    on error\n      error \"I can't read this page yet. In Safari, turn on Develop, Allow JavaScript from Apple Events.\"\n    end try\n    if u is missing value then set u to \"\"\n  end if\n  if u is \"\" then error \"I couldn't find result \" & n & \" on this page.\"\n  tell application \"Safari\" to set URL of current tab of front window to u\n  delay 2\n  tell application \"Safari\" to return name of current tab of front window\nend if\nerror \"Opening a result works on a page in Chrome or Safari.\"",
+    "speak": "Opening {result}.",
+    "risky": false,
+    "moves": false,
+    "examples": [
+      "play the first video",
+      "play the first video on the current page",
+      "open the second result",
+      "click the third one"
+    ],
+    "not_for": "Pausing or resuming a video that is already open (app_action play_pause); searching (search_here)."
+  },
+  {
     "name": "type_here",
     "description": "Type dictated text wherever the cursor is in the front app (a text box, search field, document), without pressing Enter.",
     "scope": null,
@@ -132,7 +186,7 @@
   },
   {
     "name": "app_action",
-    "description": "Do a common action in the app in front: go back or forward, reload, new item, new or close or switch tab, undo, redo, find, save, zoom, scroll, jump to top or bottom.",
+    "description": "Do a common action in the app or page in front: play/pause, next or previous video or song, go back or forward, reload, new item, new or close or switch tab, undo, redo, find, save, zoom, scroll, jump to top or bottom.",
     "scope": null,
     "args": [
       {
@@ -140,6 +194,9 @@
         "kind": "enum",
         "instructions": "Which action in the front app does the user want?",
         "criteria": {
+          "play_pause": "Play or pause the video or music that is already open in the front app or page (not opening one from a list)",
+          "next_media": "Skip to the next video, song or episode in the front app or page",
+          "previous_media": "Go to the previous video, song or episode in the front app or page",
           "back": "Go back to the previous page/screen",
           "forward": "Go forward again",
           "reload": "Reload or refresh the page",
@@ -161,18 +218,26 @@
         }
       }
     ],
-    "script": "set a to \"{{action}}\"\ntell application \"System Events\"\n  if a is \"back\" then\n    keystroke \"[\" using {command down}\n  else if a is \"forward\" then\n    keystroke \"]\" using {command down}\n  else if a is \"reload\" then\n    keystroke \"r\" using {command down}\n  else if a is \"new_item\" then\n    keystroke \"n\" using {command down}\n  else if a is \"new_tab\" then\n    keystroke \"t\" using {command down}\n  else if a is \"close_tab\" then\n    keystroke \"w\" using {command down}\n  else if a is \"next_tab\" then\n    key code 48 using {control down}\n  else if a is \"previous_tab\" then\n    key code 48 using {control down, shift down}\n  else if a is \"undo\" then\n    keystroke \"z\" using {command down}\n  else if a is \"redo\" then\n    keystroke \"z\" using {command down, shift down}\n  else if a is \"find\" then\n    keystroke \"f\" using {command down}\n  else if a is \"save\" then\n    keystroke \"s\" using {command down}\n  else if a is \"zoom_in\" then\n    keystroke \"=\" using {command down}\n  else if a is \"zoom_out\" then\n    keystroke \"-\" using {command down}\n  else if a is \"scroll_down\" then\n    key code 121\n  else if a is \"scroll_up\" then\n    key code 116\n  else if a is \"top\" then\n    key code 115\n  else if a is \"bottom\" then\n    key code 119\n  end if\nend tell\nreturn a",
+    "script": "set a to \"{{action}}\"\ntell application \"System Events\" to set frontApp to name of first application process whose frontmost is true\nset onYouTube to (frontApp is \"Web App\" or frontApp is \"Google Chrome\" or frontApp is \"Safari\") and (\"{{focus_name}}{{focus_id}}\" contains \"youtube\")\nset focusUrl to \"{{focus_id}}\"\nif onYouTube and focusUrl starts with \"http\" and focusUrl does not contain \"/watch\" and focusUrl does not contain \"/shorts/\" then\n  if a is \"play_pause\" or a is \"next_media\" or a is \"previous_media\" then\n    error \"No video is open on this page. Say play the first video to start one.\"\n  end if\nend if\nif a is \"play_pause\" then\n  -- YouTube's own shortcut is k; media players use space. Anywhere else space would type into a\n  -- text field, so say so instead of pressing it.\n  if onYouTube then\n    tell application \"System Events\" to keystroke \"k\"\n  else if frontApp is in {\"Spotify\", \"Music\", \"Podcasts\", \"TV\", \"QuickTime Player\", \"VLC\", \"IINA\", \"Books\"} then\n    tell application \"System Events\" to key code 49\n  else\n    error \"There is nothing to play or pause in \" & frontApp & \".\"\n  end if\n  return a\nend if\nif a is \"next_media\" or a is \"previous_media\" then\n  tell application \"System Events\"\n    if onYouTube and a is \"next_media\" then\n      keystroke \"n\" using {shift down}\n    else if onYouTube then\n      keystroke \"[\" using {command down}\n    else if frontApp is in {\"Spotify\", \"Music\", \"Podcasts\", \"TV\"} then\n      if a is \"next_media\" then\n        key code 124 using {command down}\n      else\n        key code 123 using {command down}\n      end if\n    else\n      error \"There is nothing to skip in \" & frontApp & \".\"\n    end if\n  end tell\n  return a\nend if\ntell application \"System Events\"\n  if a is \"back\" then\n    keystroke \"[\" using {command down}\n  else if a is \"forward\" then\n    keystroke \"]\" using {command down}\n  else if a is \"reload\" then\n    keystroke \"r\" using {command down}\n  else if a is \"new_item\" then\n    keystroke \"n\" using {command down}\n  else if a is \"new_tab\" then\n    keystroke \"t\" using {command down}\n  else if a is \"close_tab\" then\n    keystroke \"w\" using {command down}\n  else if a is \"next_tab\" then\n    key code 48 using {control down}\n  else if a is \"previous_tab\" then\n    key code 48 using {control down, shift down}\n  else if a is \"undo\" then\n    keystroke \"z\" using {command down}\n  else if a is \"redo\" then\n    keystroke \"z\" using {command down, shift down}\n  else if a is \"find\" then\n    keystroke \"f\" using {command down}\n  else if a is \"save\" then\n    keystroke \"s\" using {command down}\n  else if a is \"zoom_in\" then\n    keystroke \"=\" using {command down}\n  else if a is \"zoom_out\" then\n    keystroke \"-\" using {command down}\n  else if a is \"scroll_down\" then\n    key code 121\n  else if a is \"scroll_up\" then\n    key code 116\n  else if a is \"top\" then\n    key code 115\n  else if a is \"bottom\" then\n    key code 119\n  end if\nend tell\nreturn a",
     "speak": "done",
     "risky": false,
     "examples": [
+      "pause",
+      "next",
       "go back",
       "scroll down",
       "undo that",
-      "next tab",
-      "zoom in",
-      "refresh"
+      "next tab"
     ],
-    "not_for": "Quitting an app (quit_app); anything in an app that is not in front."
+    "not_for": "Quitting an app (quit_app); anything in an app that is not in front; opening or playing an item from a list of results (open_result).",
+    "moves_args": {
+      "action": [
+        "new_tab",
+        "next_tab",
+        "previous_tab",
+        "new_item"
+      ]
+    }
   },
   {
     "name": "toggle_dark_mode",

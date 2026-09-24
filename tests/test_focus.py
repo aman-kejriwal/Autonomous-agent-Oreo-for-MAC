@@ -35,7 +35,7 @@ def test_router_state_carries_focus():
     ctx = MacContext("Notes", ["Notes"], [], focus=MY_NOTE, recent=(TAB,))
     st = _state("write buy milk", ctx)
     assert st["open_in_frontmost_app"] == {"app": "Notes", "note": "My_Note"}
-    assert st["recently_worked_on"] == [{"app": "Google Chrome", "tab": "GitHub"}]
+    assert st["recently_worked_on"] == [{"app": "Google Chrome", "tab": "GitHub", "url": "https://github.com"}]
     assert "open_in_frontmost_app" not in _state("hi", MacContext("Finder", [], []))
 
 

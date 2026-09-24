@@ -62,12 +62,15 @@ macbrow inverts this. Code owns the workflow and hands Jev small, typed question
   `{{focus_id}}` / `{{focus_name}}` placeholders. When a new tool has to be written, the
   codegen tier gets the target app's real AppleScript dictionary (its bundled `.sdef`) instead
   of guessing commands.
-- **It stays where you are.** Tools that would take you elsewhere (switch apps, open a window,
-  tab or other note) are marked `moves` (declared in `seed.json`, detected in generated
-  scripts). The routing request also judges whether you *explicitly* asked to go somewhere
-  ("open Spotify", "go to github"). If not, the agent re-routes among in-place tools
-  (`search_here`, `app_action`, the front app's own tools, a web task in the current tab), and
-  if none fits it asks "That would take you out of this page. Should I...?" before leaving.
+- **Every command is for what's in front.** "Pause", "next", "search for X", "write X" act on the
+  app, page or tab in front, never on a background app and never by opening something new,
+  unless you name another one ("pause Spotify", "write milk in my note", "open Slack", "new
+  tab"). Tools that take you elsewhere are marked `moves` (declared in `seed.json`, detected in
+  generated scripts); tools scoped to another app act elsewhere. The routing request also judges
+  whether you *explicitly* pointed elsewhere. If not, the agent re-routes among tools that work in
+  front (`search_here`, `type_here`, `app_action`, the front app's own tools, a web task in the
+  current tab). If none clearly fits, a background-only action still runs (you stay put), and
+  leaving is asked first: "That would take you out of this page. Should I...?"
 
 Measured on this machine: "add the best vacuum cleaner to my Amazon cart" completed in 4
 steps and 11 s; "the return date should be November 4th" as a follow-up in the same tab, 6

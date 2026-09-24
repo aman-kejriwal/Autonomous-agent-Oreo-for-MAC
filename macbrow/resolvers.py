@@ -35,18 +35,76 @@ def _fetch(url: str, timeout: float = 8.0) -> str:
         return r.read().decode("utf-8", "replace")
 
 
+def _youtube_video_ids(query: str) -> list[str]:
+    """Video ids of a YouTube search, in the order the results page lists them."""
+    html = _fetch("https://www.youtube.com/results?search_query=" + urllib.parse.quote_plus(query))
+    ids = re.findall(r'"videoRenderer":\{"videoId":"([A-Za-z0-9_-]{11})"', html) or re.findall(
+        r'"videoId":"([A-Za-z0-9_-]{11})"', html
+    )
+    return list(dict.fromkeys(ids))
+
+
 def youtube_first_result(query: str) -> str:
     """Watch URL of the first video for a YouTube search."""
     q = query.strip()
     if not q:
         raise ResolveError("I didn't catch what to play.")
-    html = _fetch("https://www.youtube.com/results?search_query=" + urllib.parse.quote_plus(q))
-    m = re.search(r'"videoRenderer":\{"videoId":"([A-Za-z0-9_-]{11})"', html) or re.search(
-        r'"videoId":"([A-Za-z0-9_-]{11})"', html
-    )
-    if not m:
+    ids = _youtube_video_ids(q)
+    if not ids:
         raise ResolveError(f"I couldn't find a YouTube video for {q}.")
-    return f"https://www.youtube.com/watch?v={m.group(1)}"
+    return f"https://www.youtube.com/watch?v={ids[0]}"
+
+
+def page_result_url(position: str, page_url: str = "") -> str:
+    """URL of result number ``position`` on the results page ``page_url``, for pages that can be read
+    without the browser (YouTube search results). "" otherwise: the tool then reads the page itself."""
+    n = int(position) if position.isdigit() else 1
+    parts = urllib.parse.urlsplit(page_url)
+    host = (parts.hostname or "").lower()
+    if (host == "youtube.com" or host.endswith(".youtube.com")) and parts.path == "/results":
+        query = urllib.parse.parse_qs(parts.query).get("search_query", [""])[0]
+        if query:
+            ids = _youtube_video_ids(query)
+            if len(ids) < n:
+                raise ResolveError(f"There are only {len(ids)} videos on this page.")
+            return f"https://www.youtube.com/watch?v={ids[n - 1]}"
+    return ""
+
+
+# Finds the n-th result link on the page in front (run by the browser through AppleScript).
+# Site-specific selectors first, then any sizeable visible link; duplicates removed.
+_RESULT_JS = """(() => {
+  const n = %d, host = location.hostname;
+  const sites = [
+    [/youtube\\.com$/, 'ytd-video-renderer a#video-title, ytd-rich-item-renderer a#video-title-link, a#video-title'],
+    [/(^|\\.)google\\./, '#search a:has(h3)'],
+    [/amazon\\./, 'div[data-component-type="s-search-result"] h2 a, div[data-component-type="s-search-result"] a.s-no-outline'],
+    [/flipkart\\.com$/, 'a[href*="/p/"]'],
+    [/github\\.com$/, '[data-testid="results-list"] a, .search-title a'],
+    [/reddit\\.com$/, 'a[slot="full-post-link"], a[data-testid="post-title"]'],
+    [/bing\\.com$/, '#b_results h2 a'],
+    [/duckduckgo\\.com$/, 'a[data-testid="result-title-a"]'],
+    [/wikipedia\\.org$/, '.mw-search-result-heading a'],
+  ];
+  let sel = null;
+  for (const [re, s] of sites) if (re.test(host)) { sel = s; break; }
+  const visible = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  let links = sel ? [...document.querySelectorAll(sel)]
+    : [...document.querySelectorAll('main a[href], article a[href], a[href]')].filter(a => a.textContent.trim().length > 15);
+  links = links.filter(a => a.href && a.href.startsWith('http') && visible(a));
+  const seen = new Set();
+  links = links.filter(a => !seen.has(a.href) && seen.add(a.href));
+  return links.length >= n ? links[n - 1].href : '';
+})()"""
+
+
+def results_page(_position: str, page_url: str = "") -> str:
+    """The results page a numbered pick refers to (the agent resolves it; see DynamicMacAgent._listing_for)."""
+    return page_url
+
+
+def result_link_js(position: str) -> str:
+    return _RESULT_JS % (int(position) if position.isdigit() else 1)
 
 
 # Search results URL per site, so "search for X" on the page that is open runs that site's own
@@ -86,7 +144,13 @@ def site_search_url(query: str, page_url: str = "") -> str:
     return "https://www.google.com/search?q=" + urllib.parse.quote_plus(f"site:{host} {q}")
 
 
-RESOLVERS = {"youtube_first_result": youtube_first_result, "site_search_url": site_search_url}
+RESOLVERS = {
+    "youtube_first_result": youtube_first_result,
+    "site_search_url": site_search_url,
+    "page_result_url": page_result_url,
+    "result_link_js": result_link_js,
+    "results_page": results_page,
+}
 
 
 async def run(fn: str, value: str, focus_id: str | None = None) -> str:

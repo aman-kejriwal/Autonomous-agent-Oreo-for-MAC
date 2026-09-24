@@ -46,7 +46,8 @@ class Route:
     web_goal_complete: float = 1.0  # p(request has the concrete details a website form needs)
     web_goal_forbidden: float = 0.0  # p(request requires buying/paying/signing in/changing an account)
     web_goal_missing: str = "nothing"  # what a clarifying question should ask for
-    explicit_move: float = 1.0  # p(user explicitly asked to go to another app/page); 1.0 when not asked
+    # p(the user explicitly named another app/page/tab/item to go to or act on); 1.0 when not asked
+    explicit_elsewhere: float = 1.0
     latency_ms: float = 0.0
     weakest_arg: tuple[str, float] | None = None
 
@@ -151,11 +152,15 @@ class JevRouter:
                     "app's name: a request that names no app ('write buy milk', 'add a line', 'read it back', "
                     "'close this') acts on `open_in_frontmost_app`, so pick the tool that works on it; one that "
                     "names something in `recently_worked_on` ('in my note', 'on that page') acts on that. "
-                    "Stay in the current app: a generic command that names no other app or website ('search "
-                    "for X', 'type X', 'go back', 'scroll down', 'next one') happens INSIDE `frontmost_app`, on "
-                    "the site or item open there, so pick a tool that works in place (search_here, type_here, "
-                    "app_action, or a tool with app_is_in_front) and never one that opens a new tab, a new site "
-                    "or another app. Only switch apps or sites when the user names them. "
+                    "Stay in the current app: a command that names no other app, website or item ('pause', "
+                    "'next', 'search for X', 'type X', 'write X', 'go back', 'scroll down') is for `frontmost_app` "
+                    "and the site or item open there, so pick a tool that works there (search_here, type_here, "
+                    "app_action, or a tool with app_is_in_front), never a tool of a background app (pausing "
+                    "Spotify while a YouTube video is in front) and never one that opens a new tab, a new site "
+                    "or another app when an in-place tool can really do it. If nothing in the current app or "
+                    "page can do what was asked (playing a video while on a shopping site, playing music while "
+                    "in Notes), pick the tool that can; the assistant asks before leaving. Never swap in a "
+                    "weaker in-place action that drops part of the request. "
                     "Which tool best fulfils the request? Prefer a tool scoped to `frontmost_app` "
                     "when the request is ambiguous between apps. A website, URL, or web search "
                     "goes to a browser tool, not to opening an application. Closing, switching or reloading "
@@ -183,19 +188,24 @@ class JevRouter:
                 )
         if any(t.runner == "browser" for t in tools):
             questions.update(_web_goal_questions())
-        questions["explicit_move"] = Noul(
+        questions["explicit_elsewhere"] = Noul(
             instructions=(
-                "The user is in `frontmost_app` (on `open_in_frontmost_app`). Does `utterance` EXPLICITLY ask "
-                "to go somewhere else: open, go to, switch to or start a different app, website, page, "
-                "file, folder, note, tab or window, by naming it or saying 'open', 'go to', 'switch to', "
-                "'new tab', 'new window'? A command that only says what to do ('search for X', 'play X', "
-                "'type X', 'find X', 'add X', 'scroll down') without naming a different place is NOT explicit."
+                "The user is in `frontmost_app` (on `open_in_frontmost_app`). Does `utterance` EXPLICITLY point "
+                "somewhere other than that app, page or tab: either to go there (open, go to, switch to, create "
+                "or start a different app, website, page, file, folder, note, document, tab or window; 'new "
+                "tab', 'next tab', 'new window') or to act there by naming it ('pause Spotify', 'next song on "
+                "Spotify', 'write milk in my note', 'what's playing in Music', 'in Slack say hi')? A command that "
+                "only says what to do ('pause', 'next', 'search for X', 'play X', 'type X', 'write X', 'add X', "
+                "'scroll down', 'go back') without naming a different app, place or item, or asking for a new "
+                "one, is NOT explicit: it is meant for what is in front."
             ),
             criteria={
                 "true": "'open Spotify', 'go to github', 'play espresso on YouTube', 'open my shopping note', "
-                "'switch to Slack', 'new tab', 'search Amazon for earbuds' while on YouTube",
-                "false": "'search for espresso', 'play espresso', 'type hello', 'find the invoice', "
-                "'add milk', 'go back', 'what's this page'",
+                "'create a note called groceries', 'make a new note with buy milk', 'switch to Slack', "
+                "'new tab', 'next tab', 'search Amazon for earbuds' while on YouTube, 'pause Spotify', "
+                "'write buy milk in my note' while in Chrome",
+                "false": "'pause', 'next', 'search for espresso', 'play espresso', 'type hello', 'write buy "
+                "milk', 'find the invoice', 'add milk', 'go back', 'what's this page'",
             },
         )
         if recent_browser:
@@ -234,7 +244,7 @@ class JevRouter:
             route.web_goal_missing = resp.choices["web_goal_missing"].choice
         if recent_browser:
             route.browser_followup = float(resp.nouls["browser_followup"].noul)
-        route.explicit_move = float(resp.nouls["explicit_move"].noul)
+        route.explicit_elsewhere = float(resp.nouls["explicit_elsewhere"].noul)
         if awaiting_confirmation:
             route.is_confirmation = float(resp.nouls["confirm"].noul)
             route.is_denial = float(resp.nouls["deny"].noul)

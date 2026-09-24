@@ -34,6 +34,7 @@ ALLOWED_SEED = {
     "notes_write",
     "notes_read",
     "search_here",
+    "open_result",
     "type_here",
     "app_action",
     "music_play_pause",

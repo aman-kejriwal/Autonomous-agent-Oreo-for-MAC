@@ -29,7 +29,10 @@ class Focus:
     id: str = ""  # stable handle a script can target: note id, URL, POSIX path...
 
     def describe(self) -> dict[str, str]:
-        return {"app": self.app, self.kind: self.name}
+        d = {"app": self.app, self.kind: self.name}
+        if self.kind == "tab" and self.id.startswith("http"):
+            d["url"] = self.id[:160]  # results page vs video/product page matters for "play the first one"
+        return d
 
 
 # Each probe returns "name<TAB>id", or "" when nothing is open. Guarded by `is running` so a

@@ -59,7 +59,7 @@ RISKY_PATTERNS = re.compile(
 # Script constructs that bring another app forward or open a new window/tab/item.
 MOVES_PATTERNS = re.compile(
     r"(\bactivate\b|open location|open\s+-n?a\b|make new (window|tab|document)|\breveal\b|\bshow\b|"
-    r"set frontmost\b|set index of window)",
+    r"set frontmost\b|set index of window|active tab index|set current tab)",
     re.IGNORECASE,
 )
 
@@ -102,6 +102,7 @@ class Tool:
     runner: str = "applescript"  # "applescript" | "browser" (jev-ultrafast web task; script unused)
     moves: bool = False  # takes the user to another app/page (see module docstring)
     stays_on: str | None = None  # ...except when the page in front is on this host
+    moves_args: dict[str, list[str]] = field(default_factory=dict)  # moves only for these arg values
 
     @property
     def blocked_by(self) -> list[str]:
@@ -167,6 +168,7 @@ class Tool:
             runner=d.get("runner", "applescript"),
             moves=bool(d["moves"]) if "moves" in d else bool(MOVES_PATTERNS.search(d["script"])),
             stays_on=d.get("stays_on"),
+            moves_args=dict(d.get("moves_args") or {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
