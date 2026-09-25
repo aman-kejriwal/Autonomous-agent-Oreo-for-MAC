@@ -111,7 +111,7 @@
   },
   {
     "name": "open_result",
-    "description": "Open or play result number N (the first, second, third...) listed on the page in front, in the same tab: a video in YouTube results, a search result, a product in a list.",
+    "description": "Open or play result number N (the first, second, third...) listed on the web page in front in Chrome or Safari, in the same tab: a video in YouTube results, a search result, a product in a list.",
     "scope": null,
     "args": [
       {
@@ -161,7 +161,11 @@
       "open the second result",
       "click the third one"
     ],
-    "not_for": "Pausing or resuming a video that is already open (app_action play_pause); searching (search_here)."
+    "not_for": "Pausing or resuming a video that is already open (app_action play_pause); searching (search_here).",
+    "front_only": [
+      "Google Chrome",
+      "Safari"
+    ]
   },
   {
     "name": "type_here",
@@ -241,7 +245,7 @@
   },
   {
     "name": "ui_press",
-    "description": "Open, select or press something by its name inside the app in front, using the app's real on-screen controls: a sidebar or library item, playlist, section, tab, list entry, button or menu command (Liked Songs in Spotify, Inbox in Mail, Settings, New Playlist).",
+    "description": "Open, select, press or play something by its name inside the app in front, using the app's real on-screen controls: a song or item shown in a list (play Butter), a sidebar or library item, playlist, section, tab, button or menu command (Liked Songs in Spotify, Inbox in Mail, Settings, New Playlist). Also 'play it' / 'play that one' right after talking about an item that is on screen.",
     "scope": null,
     "runner": "ui",
     "args": [],
@@ -251,12 +255,31 @@
     "moves": false,
     "examples": [
       "open the liked songs",
+      "play the butter song",
+      "play it",
       "go to my Pasoori playlist",
-      "open settings",
-      "show my episodes",
-      "click the create button"
+      "open settings"
     ],
-    "not_for": "Web pages in Chrome or Safari (search_here, open_result, web_task); opening another app (open_app); typing text (type_here)."
+    "not_for": "Web pages in Chrome or Safari (search_here, open_result, web_task); opening another app (open_app); typing text (type_here); resuming or pausing whatever is already playing (app_action play_pause / spotify_play_pause)."
+  },
+  {
+    "name": "read_screen",
+    "description": "Answer a question about what is visible in the app or page in front right now: which songs, items, messages, results or buttons are showing, whether something is on screen, what a list or page contains.",
+    "scope": null,
+    "runner": "ui_read",
+    "args": [],
+    "script": "",
+    "speak": "result",
+    "risky": false,
+    "moves": false,
+    "examples": [
+      "what songs can you see",
+      "can you see a butter song on this page",
+      "what's on the screen",
+      "read me the list",
+      "which playlists do I have here"
+    ],
+    "not_for": "What is playing right now (spotify_now_playing / music_now_playing); the URL of the page (chrome_get_url)."
   },
   {
     "name": "toggle_dark_mode",
@@ -392,7 +415,8 @@
       "search for weather in Paris",
       "search youtube for the love hypothesis"
     ],
-    "moves": true
+    "moves": true,
+    "not_for": "'search for X' while another app is in front and no website or web search is named (search_here searches inside that app)."
   },
   {
     "name": "safari_new_tab",
@@ -519,7 +543,8 @@
       "search for weather in Paris",
       "search youtube for the love hypothesis"
     ],
-    "moves": true
+    "moves": true,
+    "not_for": "'search for X' while another app is in front and no website or web search is named (search_here searches inside that app)."
   },
   {
     "name": "youtube_play",
@@ -742,7 +767,7 @@
       "pause the music",
       "play"
     ],
-    "not_for": "Asking what is playing."
+    "not_for": "Playing a specific song, playlist or item by name, or 'play it' about an item just talked about (ui_press)."
   },
   {
     "name": "music_next",
@@ -776,7 +801,8 @@
     "examples": [
       "pause spotify",
       "resume the music"
-    ]
+    ],
+    "not_for": "Playing a specific song, playlist or item by name, or 'play it' about an item just talked about (ui_press)."
   },
   {
     "name": "spotify_next",

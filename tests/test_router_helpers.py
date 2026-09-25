@@ -1,4 +1,4 @@
-from macbrow.router import _clean_value, _span_candidates
+from macbrow.router import _clean_value, _span_candidates, _span_confidence
 
 
 def test_span_candidates_prefers_suffixes_then_inner_spans():
@@ -24,3 +24,15 @@ def test_clean_value_normalises_spoken_urls():
 def test_clean_value_strips_trailing_punctuation():
     assert _clean_value("trailer of love hypothesis.") == "trailer of love hypothesis"
     assert _span_candidates("play the trailer. Done.")[0] == "play the trailer. Done"
+
+
+def test_span_confidence_counts_wordings_of_the_same_value():
+    probs = {
+        "a dynamite song": 0.42,
+        "dynamite": 0.24,
+        "dynamite song": 0.22,
+        "play a dynamite song": 0.08,
+        "__none__": 0.03,
+    }
+    assert round(_span_confidence("a dynamite song", probs), 2) == 0.96
+    assert _span_confidence("butter", {"butter": 0.3, "dynamite": 0.6}) == 0.3  # a different value is not counted

@@ -78,7 +78,10 @@ macbrow inverts this. Code owns the workflow and hands Jev small, typed question
   request ([`macbrow/ui.py`](macbrow/ui.py)). The window is read while Jev routes, so it costs
   no extra round-trip. The press is verified: if the window didn't change it tries the button
   inside the row, then a real click, and otherwise says nothing happened instead of "done".
-  Buttons like Delete, Send, Log Out or Buy always need a spoken yes. The same pick runs before
+  Buttons like Delete, Send, Log Out or Buy always need a spoken yes. "Search for X" uses the
+  app's own search box from the same tree (a search field, a box labelled search/find, or the one
+  a "Search" button reveals; never a message box, a document or a name in a list), checks it has
+  the focus before typing and that results appeared after; per-app shortcuts are only the fallback. The same pick runs before
   the LLM is asked to write a new tool, so most "open X in this app" requests never need one.
 
 Measured on this machine: "add the best vacuum cleaner to my Amazon cart" completed in 4

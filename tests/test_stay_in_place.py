@@ -101,3 +101,20 @@ def test_youtube_results_are_read_without_the_browser_only_on_youtube():
 
     assert page_result_url("1", "https://www.amazon.in/s?k=x") == ""
     assert page_result_url("1", "https://www.youtube.com/watch?v=x") == ""
+
+
+def test_own_app_tools_stay_when_their_app_is_in_front():
+    reg = ToolRegistry()
+    spotify = MacContext("Spotify", ["Spotify"], [], focus=Focus("Spotify", "window", "Spotify Premium"))
+    assert not DynamicMacAgent._leaves(reg.get("spotify_search_track"), {"query": "x"}, spotify)  # only activates
+    assert DynamicMacAgent._leaves(reg.get("spotify_search_track"), {"query": "x"}, _ctx("Notes", NOTE))
+    assert DynamicMacAgent._leaves(reg.get("chrome_open"), {"site": "github"}, _ctx("Google Chrome", YT))  # new tab
+
+
+def test_media_query_drops_filler_words():
+    from macbrow.agent import _media_query
+
+    assert _media_query("a dynamite song") == "dynamite"
+    assert _media_query("the butter song by BTS") == "butter song by BTS"  # only leading/trailing filler
+    assert _media_query("some lo-fi music") == "lo-fi"
+    assert _media_query("song") == "song"  # never empty

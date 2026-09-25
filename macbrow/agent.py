@@ -21,10 +21,11 @@ from typing import Any
 
 from typesafe_sdk import Choice
 
-from . import browser_task, policy, resolvers, ui
+from . import answer, browser_task, policy, resolvers, ui
 from .applescript import ContextPoller, run_applescript
 from .focus import probed_apps
 from .generator import DUPLICATE, ToolGenerator
+from .memory import SessionMemory
 from .registry import Tool, ToolRegistry
 from .router import JevRouter, Route
 
@@ -43,6 +44,11 @@ UI_PRESS_CONFIDENCE = 0.5  # p(this on-screen element is what the user meant) to
 UI_ASK_CONFIDENCE = 0.25  # between the two: ask "did you mean X?"; below: say it isn't there
 UI_FALLBACK_CONFIDENCE = 0.6  # before writing a new tool, press an element this clearly meant
 BROWSERS = {"google chrome", "safari"}
+# Tools that go looking for something; when it is already on screen, pressing it is what was meant.
+ON_SCREEN_FIRST = {"search_here", "spotify_search_track", "youtube_play"}
+_SEARCH_WORDS = re.compile(r"\b(search|look up|find|look for)\b", re.IGNORECASE)
+_PLAY_WORDS = re.compile(r"\b(play|put on|listen to|start)\b", re.IGNORECASE)
+_FILLER = {"the", "a", "an", "song", "songs", "track", "video", "play", "open", "my", "by", "some", "me", "on"}
 
 
 # Tools a browser follow-up may replace with a web task in the current tab: they would open
@@ -80,6 +86,7 @@ class Outcome:
     executed: bool = False
     learned: Tool | None = None
     timings: dict[str, float] = field(default_factory=dict)
+    recorded: bool = False  # steps already went into session memory one by one
 
 
 @dataclass
@@ -102,8 +109,12 @@ class DynamicMacAgent:
         voice layer can say a filler line instead of leaving silence."""
         self.on_learning = on_learning
         self.registry = registry or ToolRegistry()
-        self.router = JevRouter(self.registry)
+        # What was said and done this session; every decision sees it (see memory.py).
+        self.memory = SessionMemory()
+        self.router = JevRouter(self.registry, memory=self.memory)
         self.generator = ToolGenerator(self.registry, jev=self.router.client) if enable_learning else None
+        if self.generator is not None:
+            self.generator.memory = self.memory
         self.state = State.IDLE
         self.pending: Pending | None = None
         self.context = ContextPoller()
@@ -128,6 +139,25 @@ class DynamicMacAgent:
         utterance = utterance.strip()
         if not utterance:
             return Outcome(handoff_to_llm=False)
+        ctx = await self.context.latest()
+        outcome = await self._handle(utterance)
+        if not outcome.recorded:
+            self._remember_turn(utterance, ctx, outcome)
+        return outcome
+
+    def _remember_turn(self, utterance: str, ctx, outcome: Outcome) -> None:
+        r = outcome.route
+        if outcome.handoff_to_llm:
+            did = "chat"
+        elif r is not None and r.tool is not None:
+            did = r.summary
+        else:
+            did = r.kind if r is not None else "?"
+        values = [v for k, v in (r.args.items() if r is not None else []) if k not in ("site", "action", "app")]
+        place = ctx.focus.name if ctx.focus else ""
+        self.memory.add(utterance, ctx.active_app, place, did, outcome.speak or "", values)
+
+    async def _handle(self, utterance: str, allow_steps: bool = True) -> Outcome:
         t0 = time.perf_counter()
         ctx = await self.context.latest()
         self._remember_listing(ctx)
@@ -138,8 +168,14 @@ class DynamicMacAgent:
 
         recent = self._recent_browser()
         route = await self.router.route(
-            utterance, ctx, awaiting_confirmation=self.state is State.AWAITING_CONFIRM, recent_browser=recent
+            utterance,
+            ctx,
+            awaiting_confirmation=self.state is State.AWAITING_CONFIRM,
+            recent_browser=recent,
+            allow_steps=allow_steps,
         )
+        if len(route.steps) > 1:  # "open Spotify and play Dynamite": one command per step, in order
+            return await self._run_steps(route.steps)
         # A follow-up to the browser task wins over whatever else Jev matched (often a mis-scoped web_task),
         # except a confident pick of a tool that already works in place (search_here, app_action, a
         # front-app tool): "now search for X" on the page just opened is not a multi-step web task.
@@ -285,7 +321,15 @@ class DynamicMacAgent:
                 self._stage(route.tool, route.args)
                 outcome.speak = f"That will {_say_tool(route.tool, route.args)}. Should I go ahead?"
                 return outcome
+            if await self._on_screen_first(route, utterance, ctx, outcome):
+                return outcome
+            wants_play = self._wants_play(route, utterance, ctx)
+            if wants_play and route.args.get("query"):
+                # "a dynamite song" finds odd covers first; "dynamite" finds the song
+                route.args["query"] = _media_query(route.args["query"])
             await self._execute(route.tool, route.args, outcome, utterance=utterance)
+            if outcome.executed and wants_play:
+                await self._play_from_results(utterance, route.args.get("query", ""), outcome)
             return outcome
 
         # new_action: first, is it simply something on screen in the front app ("open liked songs")?
@@ -512,6 +556,8 @@ class DynamicMacAgent:
             return False
         if tool.name == "open_app" and args and args.get("app", "").lower() == ctx.active_app.lower():
             return False  # already there
+        if tool.scope and tool.scope.lower() == ctx.active_app.lower() and not tool.opens_new:
+            return False  # "activate Spotify" while Spotify is in front goes nowhere (a new tab still would)
         # a mover that works in the page that is open (youtube_play on a YouTube tab) stays
         return not (tool.stays_on and ctx.focus and tool.stays_on in ctx.focus.id)
 
@@ -567,6 +613,93 @@ class DynamicMacAgent:
         outcome.speak = f"That would take you out of {_place(ctx)}. Should I {_say_tool(tool)}?"
         return route
 
+    # ------------------------------------------------------------------ steps
+    async def _run_steps(self, steps: list[str]) -> Outcome:
+        """Several commands in one sentence, run in order. Each step is routed on the screen the
+        previous one left (Spotify is in front before "play Dynamite" is decided) and goes into
+        session memory; the run stops at a question, a failure or small talk."""
+        log.info("steps: %s", steps)
+        said: list[str] = []
+        last = Outcome()
+        for i, step in enumerate(steps):
+            ctx = await self.context.latest()
+            last = await self._handle(step, allow_steps=False)
+            self._remember_turn(step, ctx, last)
+            if last.speak:
+                said.append(last.speak)
+            r = last.route
+            asked = self.state is State.AWAITING_CONFIRM or (r is not None and r.kind == "uncertain")
+            failed = r is not None and r.tool is not None and not last.executed
+            if last.stop or last.handoff_to_llm or asked or failed:
+                if i < len(steps) - 1:
+                    log.info("steps stopped after %r", step)
+                break
+            if i < len(steps) - 1:
+                await self._settle(ctx.active_app, r.tool if r else None, (r.args if r else {}).get("app"))
+        return Outcome(
+            speak=" ".join(t if t.endswith((".", "?", "!")) else t + "." for t in said) or None,
+            handoff_to_llm=last.handoff_to_llm and not said,
+            stop=last.stop,
+            route=last.route,
+            executed=last.executed,
+            recorded=True,
+        )
+
+    async def _settle(self, app_before: str, tool: Tool | None, target: str | None = None) -> None:
+        """Let the previous step land: wait for the app it opened to come to the front and draw its
+        window, or for the page to update, before the next step reads the screen."""
+        if tool is not None and tool.moves:
+            deadline = time.monotonic() + 4.0
+            while time.monotonic() < deadline:
+                ctx = await self.context.refresh()
+                arrived = ctx.active_app.lower() == target.lower() if target else ctx.active_app != app_before
+                if arrived:
+                    break
+                await asyncio.sleep(0.3)
+            ctx = await self.context.latest()
+            if ctx.active_app.lower() not in BROWSERS and ctx.active_app.lower() not in policy.BLOCKED_APPS:
+                for _ in range(10):  # a cold-started app may still be drawing
+                    snap = await asyncio.to_thread(ui.snapshot, ctx.active_app, False, 2000)
+                    if snap is not None and len(snap.elements) >= 10:
+                        break
+                    await asyncio.sleep(0.5)
+        else:
+            await asyncio.sleep(0.8)
+            await self.context.refresh()
+
+    # ------------------------------------------------------------- play what was searched
+    @staticmethod
+    def _wants_play(route: Route, utterance: str, ctx) -> bool:
+        return (
+            route.tool is not None
+            and route.tool.name in ("search_here", "spotify_search_track")
+            and bool(_PLAY_WORDS.search(utterance))
+            and not _SEARCH_WORDS.search(utterance)
+            and ctx.active_app.lower() not in BROWSERS
+        )
+
+    async def _play_from_results(self, utterance: str, query: str, outcome: Outcome) -> None:
+        """Play what was just searched for ("play Dynamite" when it wasn't on screen): press the top
+        result's Play button (verified like any press) instead of stopping at a results page. The
+        app ranked the results, so the first matching Play button is the one meant; Jev chooses
+        only when no Play button matches the search."""
+        searched = outcome.speak or ""
+        await asyncio.sleep(1.5)  # results render
+        ctx = await self.context.refresh()
+        self._ui_prefetch = None  # the results page, not the page before the search
+        snap = await self._ui_snapshot(ctx)
+        wanted = set(re.findall(r"[a-z0-9]+", query.lower())) - _FILLER
+        if snap is not None and wanted:
+            for el in snap.elements:
+                words = set(re.findall(r"[a-z0-9]+", el.label.lower()))
+                if el.label.lower().startswith("play ") and not el.in_menu and wanted <= words:
+                    log.info("playing the top result: %r", el.label)
+                    await self._press(el, snap, ctx, outcome)
+                    return
+        if await self._press_on_screen(utterance, ctx, outcome, min_confidence=UI_PRESS_CONFIDENCE):
+            return
+        outcome.speak = f"{searched} I couldn't find a play button for it; say which one to play."
+
     # ------------------------------------------------------------- on-screen controls
     def _start_ui_snapshot(self, ctx) -> asyncio.Task | None:
         app = ctx.active_app
@@ -602,11 +735,20 @@ class DynamicMacAgent:
         crit, by_key = ui.choice_criteria(ui.candidates(snap, utterance))
         crit["__none__"] = "None of these elements does what the user asked"
         resp = await self.router.client.system_one(
-            state={"utterance": utterance, "app": snap.app, "window": snap.window},
+            state={
+                "utterance": utterance,
+                "app": snap.app,
+                "window": snap.window,
+                "conversation": self.memory.recent(),
+            },
             questions={
                 "pick": Choice(
                     instructions=[
-                        "The user said `utterance` to a voice assistant while `app` is in front.",
+                        "The user said `utterance` to a voice assistant while `app` is in front. "
+                        "`conversation` is the session so far: 'it', 'that one', 'play it' refer to what was "
+                        "talked about there.",
+                        "To play a song, video or item, choose its 'Play ...' button (or the item itself), "
+                        "never a search button or search box when the item is listed.",
                         "Which on-screen element of the app should be pressed to do it? Each option is a real "
                         "element; its description says what kind it is and which section it sits in.",
                         "Choose __none__ if no element does it.",
@@ -642,6 +784,65 @@ class DynamicMacAgent:
             return True
         return await self._press(el, snap, ctx, outcome)
 
+    async def _read_screen(self, question: str, outcome: Outcome) -> None:
+        """Answer a question about what the front app shows, from its on-screen text."""
+        ctx = await self.context.latest()
+        app = ctx.active_app
+        if app.lower() in policy.BLOCKED_APPS:
+            outcome.speak = f"I don't read {app}."
+            return
+        t0 = time.perf_counter()
+        screen = await asyncio.to_thread(ui.screen_text, app)
+        if not screen:
+            outcome.speak = f"I can't read anything in {app} right now."
+            return
+        outcome.speak = await answer.about_screen(question, app, screen, self.memory.as_text())
+        outcome.executed = True
+        outcome.timings["read_ms"] = (time.perf_counter() - t0) * 1e3
+
+    async def _on_screen_first(self, route: Route, utterance: str, ctx, outcome: Outcome) -> bool:
+        """ "Play the butter song" while it is on screen: press it instead of searching for it."""
+        if route.tool is None or route.tool.name not in ON_SCREEN_FIRST or _SEARCH_WORDS.search(utterance):
+            return False
+        wanted = {w for w in re.findall(r"[a-z0-9]+", " ".join(route.args.values()).lower()) if w not in _FILLER}
+        if not wanted:
+            return False
+        snap = await self._ui_snapshot(ctx)
+        if snap is None or not any(wanted <= set(re.findall(r"[a-z0-9]+", e.label.lower())) for e in snap.elements):
+            return False  # not on screen: search as planned
+        log.info("on screen first: %s is visible in %s", " ".join(sorted(wanted)), snap.app)
+        return await self._press_on_screen(utterance, ctx, outcome, min_confidence=UI_FALLBACK_CONFIDENCE)
+
+    async def _search_in_app(self, query: str, outcome: Outcome) -> bool:
+        """Search with the front app's real search box (found in its accessibility tree, focus
+        checked before typing, results checked after). False when there is no usable box, so the
+        caller falls back to the app's keyboard shortcut; web pages keep their search URL."""
+        ctx = await self.context.latest()
+        app = ctx.active_app
+        if not query or app.lower() in BROWSERS or app.lower() in policy.BLOCKED_APPS:
+            return False
+        snap = await self._ui_snapshot(ctx)
+        q = query.strip().lower()
+        already = next(
+            (e.label for e in (snap.elements if snap else []) if e.label.lower() in (q, f"play {q}") and not e.in_menu),
+            None,
+        )
+        t0 = time.perf_counter()
+        status = await asyncio.to_thread(ui.search_in_app, app, query)
+        outcome.timings["search_ms"] = (time.perf_counter() - t0) * 1e3
+        log.info("search in %s for %r with its search box: %s", app, query, status)
+        if status in ("no field", "no focus"):
+            return False
+        await self.context.refresh()
+        if status == "no change":
+            outcome.speak = f"I typed {query} into {app}'s search, but no results showed up."
+            return True
+        outcome.executed = True
+        outcome.speak = f"Searching {app} for {query}."
+        if already:
+            outcome.speak += f" {already.removeprefix('Play ')} was already on screen too."
+        return True
+
     async def _press_confirmed(self, args: dict[str, str], ctx, outcome: Outcome) -> None:
         snap = await self._ui_snapshot(ctx)
         el = ui.find(snap, args) if snap else None
@@ -667,7 +868,12 @@ class DynamicMacAgent:
         if how is None:
             outcome.speak = f"Nothing changed after pressing {el.label}. It may already be open."
             return True
-        outcome.speak = f"Done: {el.label}." if el.in_menu else f"Opened {el.label}."
+        if el.in_menu:
+            outcome.speak = f"Done: {el.label}."
+        elif el.label.lower().startswith("play "):
+            outcome.speak = f"Playing {el.label[5:]}."
+        else:
+            outcome.speak = f"Opened {el.label}."
         return True
 
     # --------------------------------------------------------------- result lists
@@ -721,6 +927,11 @@ class DynamicMacAgent:
         if tool.runner == "browser":
             await self._execute_browser(tool, args, outcome, utterance)
             return
+        if tool.runner == "ui_read":
+            await self._read_screen(utterance, outcome)
+            return
+        if tool.name == "search_here" and await self._search_in_app(args.get("query", ""), outcome):
+            return  # used the app's own search box; the keyboard-shortcut script is only the fallback
         if tool.runner == "ui":
             ctx = await self.context.latest()
             if args.get("label"):  # confirmed earlier: press that exact element
@@ -817,6 +1028,19 @@ def _is_listing(url: str) -> bool:
 
 def _host(url: str) -> str:
     return re.sub(r"^www\.", "", url.split("/")[2].lower()) if url.count("/") >= 2 else ""
+
+
+_MEDIA_FILLER = re.compile(
+    r"^(?:(?:the|a|an|some|my|that|this)\s+)+|\s+(?:song|songs|track|tracks|music|video|tune)$", re.IGNORECASE
+)
+
+
+def _media_query(query: str) -> str:
+    """What to type into a music app's search for "play a dynamite song": just "dynamite"."""
+    cleaned = query.strip()
+    for _ in range(3):
+        cleaned = _MEDIA_FILLER.sub("", cleaned).strip()
+    return cleaned or query
 
 
 def _on_web_page(ctx) -> bool:

@@ -23,6 +23,7 @@ async def _main(argv: list[str]) -> int:
     ap.add_argument("--dry", action="store_true", help="route only; do not execute or learn")
     ap.add_argument("--no-learn", action="store_true", help="disable the LLM tool-generation fallback")
     ap.add_argument("--policy", action="store_true", help="list every tool with its policy status and exit")
+    ap.add_argument("--ui", metavar="APP", help="print APP's accessibility tree and what Jev can choose from")
     ap.add_argument("-v", "--verbose", action="store_true")
     ns = ap.parse_args(argv)
     logging.basicConfig(
@@ -30,6 +31,21 @@ async def _main(argv: list[str]) -> int:
     )
     load_dotenv(".env.local")
     load_dotenv()
+
+    if ns.ui:
+        from . import ui
+
+        print(f"== {ns.ui}: raw accessibility tree of the front window (role 'label' [actions]) ==")
+        print("\n".join(ui.dump_tree(ns.ui)))
+        snap = ui.snapshot(ns.ui)
+        if snap:
+            opts = ui.candidates(snap, " ".join(ns.utterance))
+            print(
+                f"\n== what Jev chooses from: {len(opts)} options ({len(snap.elements)} pressable, read in {snap.elapsed_ms:.0f} ms) =="
+            )
+            for e in opts:
+                print(f"  {e.describe()}{'   <- needs a spoken yes' if e.dangerous else ''}")
+        return 0
 
     if ns.policy:
         from . import policy as _policy

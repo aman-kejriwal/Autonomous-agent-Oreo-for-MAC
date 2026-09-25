@@ -103,8 +103,9 @@ TOOL_RESPONSE_FORMAT: dict[str, Any] = llm_utils.to_openai_response_format(Gener
 
 SYSTEM = """You write a NEW AppleScript tool for a voice-controlled macOS assistant.
 
-You receive the user's spoken request, the app in front, the running apps, and the names of
-tools that ALREADY exist. You may also receive `open_in_frontmost_app` (the note, tab, folder or
+You receive the user's spoken request, the app in front, the running apps, the conversation
+so far in this session (the request is usually the next step of that task: resolve "it", "that
+one", "the same" against it), and the names of tools that ALREADY exist. You may also receive `open_in_frontmost_app` (the note, tab, folder or
 document the user is working on right now) and `target_app` with `target_app_dictionary` (the commands and
 properties that app's AppleScript dictionary really has). Your job is to create one tool that does NOT exist yet and that
 fulfils the request. The existing list is only there so you pick a different, non-clashing
@@ -187,6 +188,9 @@ class ToolGenerator:
         }
         if ctx.focus:
             info["open_in_frontmost_app"] = ctx.focus.describe()
+        memory = getattr(self, "memory", None)
+        if memory is not None and memory.turns:
+            info["conversation"] = memory.recent()  # the task this request is a step of
         # The app the request names ("... in Spotify"), else the one in front.
         said = utterance.lower()
         named = [a for a in (*ctx.running_apps, *ctx.installed_apps) if len(a) > 2 and a.lower() in said]

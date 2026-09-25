@@ -128,6 +128,7 @@ class ContextPoller:
         self._installed: list[str] = []
         self._installed_at = 0.0
         self._seen: dict[str, tuple[Focus, float]] = {}  # app (lowercase) -> (last focus, monotonic time)
+        self._ctx_started = 0.0  # when the stored snapshot started reading: an older read never overwrites it
 
     async def start(self) -> MacContext:
         if self._task is None:
@@ -162,10 +163,19 @@ class ContextPoller:
             if focus is not None:
                 self.remember(focus)
         try:
-            self._ctx = await self._refresh()
+            await self._store()
         except Exception:
             pass
         return await self.latest()
+
+    async def _store(self) -> None:
+        """Read and keep the result, unless a read that started later was already kept: the
+        background loop and an on-demand refresh overlap, and the slower, older read must not
+        put an app that was just replaced back in front."""
+        started = time.monotonic()
+        ctx = await self._refresh()
+        if started >= self._ctx_started:
+            self._ctx, self._ctx_started = ctx, started
 
     def remember(self, focus: Focus, now: float | None = None) -> None:
         self._seen[focus.app.lower()] = (focus, time.monotonic() if now is None else now)
@@ -205,6 +215,6 @@ class ContextPoller:
         while True:
             await asyncio.sleep(self.interval)
             try:
-                self._ctx = await self._refresh()
+                await self._store()
             except Exception:  # keep polling on transient osascript failures
                 pass

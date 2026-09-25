@@ -270,6 +270,11 @@ class MacBrowAgent(Agent):
         )
         if outcome.handoff_to_llm:
             self.hud.done()
+            # The chat LLM answers with the whole session in view, not just this sentence.
+            history = self.mac.memory.as_text()
+            await self.update_instructions(
+                INSTRUCTIONS + (f"\n\nThis session so far, oldest first:\n{history}" if history else "")
+            )
             return  # normal LLM reply
 
         if outcome.stop:  # the user explicitly ended the session: close now, not after the idle wait
@@ -341,6 +346,13 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             hud.set_text(ev.transcript)
             if ev.is_final:
                 hud.transcript_arrived()
+
+    # Chat replies are written by the LLM after the turn was recorded; add them to session memory.
+    @session.on("conversation_item_added")
+    def _on_item(ev):
+        item = ev.item
+        if getattr(item, "role", None) == "assistant" and getattr(item, "text_content", None):
+            mac.memory.note_reply(item.text_content)
 
     # Keep the HUD alive while anyone is talking or the agent is working.
     @session.on("user_state_changed")

@@ -70,3 +70,13 @@ def test_seed_tools_can_opt_out_of_keystroke_risk():
     assert not Tool.from_dict({"name": "a", "description": "d", "script": script, "risky": False}, "seed").risky
     # generated tools cannot opt out
     assert Tool.from_dict({"name": "a", "description": "d", "script": script, "risky": False}, "learned").risky
+
+
+def test_superseded_learned_tools_are_kept_but_not_offered():
+    from macbrow.applescript import MacContext
+    from macbrow.registry import Tool
+
+    t = Tool.from_dict(
+        {"name": "a_tool", "description": "d", "script": "return 1", "superseded_by": "search_here"}, "learned"
+    )
+    assert not t.is_available(MacContext("Spotify", ["Spotify"], []))

@@ -18,6 +18,7 @@ from typing import Any
 from typesafe_sdk import AsyncTypeSafeClient, Choice, Noul
 
 from .applescript import MacContext
+from .memory import SessionMemory
 from .registry import MAX_CHOICE_OPTIONS, Tool, ToolRegistry
 
 log = logging.getLogger("macbrow.router")
@@ -31,6 +32,10 @@ MIN_TOOL_CONFIDENCE = 0.45  # below this we treat the pick as uncertain
 NEW_ACTION_MIN_CONFIDENCE = 0.6  # hesitant new_action -> ask about the best existing tool instead
 UNCERTAIN_TOOL_MIN_PROB = 0.2
 MAX_TEXT_CANDIDATES = 200  # Jev Choice allows 255 options
+MAX_RECALL = 40  # of those, values taken from earlier turns
+SINGLE = "single"
+STEPS_MIN_CONFIDENCE = 0.6
+_JOINER = re.compile(r"\s*,?\s*\b(and then|and also|after that|then|and|also)\b\s*", re.IGNORECASE)
 
 
 @dataclass
@@ -46,6 +51,7 @@ class Route:
     web_goal_complete: float = 1.0  # p(request has the concrete details a website form needs)
     web_goal_forbidden: float = 0.0  # p(request requires buying/paying/signing in/changing an account)
     web_goal_missing: str = "nothing"  # what a clarifying question should ask for
+    steps: list[str] = field(default_factory=list)  # "open Spotify and play Dynamite" -> two commands, in order
     # p(the user explicitly named another app/page/tab/item to go to or act on); 1.0 when not asked
     explicit_elsewhere: float = 1.0
     latency_ms: float = 0.0
@@ -58,7 +64,12 @@ class Route:
         return self.kind
 
 
-def _state(utterance: str, ctx: MacContext, recent_browser: dict[str, str] | None = None) -> dict[str, Any]:
+def _state(
+    utterance: str,
+    ctx: MacContext,
+    recent_browser: dict[str, str] | None = None,
+    conversation: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     import datetime as _dt
 
     st: dict[str, Any] = {
@@ -73,6 +84,8 @@ def _state(utterance: str, ctx: MacContext, recent_browser: dict[str, str] | Non
         st["recently_worked_on"] = [f.describe() for f in ctx.recent]
     if recent_browser:
         st["recent_browser_task"] = recent_browser
+    if conversation:
+        st["conversation"] = conversation  # this session so far, oldest first
     return st
 
 
@@ -81,9 +94,15 @@ def _arg_qid(tool: Tool, arg_name: str) -> str:
 
 
 class JevRouter:
-    def __init__(self, registry: ToolRegistry, client: AsyncTypeSafeClient | None = None):
+    def __init__(
+        self, registry: ToolRegistry, client: AsyncTypeSafeClient | None = None, memory: SessionMemory | None = None
+    ):
         self.registry = registry
         self.client = client or AsyncTypeSafeClient()
+        self.memory = memory  # every question gets the session's recent turns
+
+    def _conversation(self) -> list[dict[str, str]] | None:
+        return self.memory.recent() if self.memory else None
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -98,6 +117,7 @@ class JevRouter:
         recent_browser: dict[str, str] | None = None,
         exclude: frozenset[str] | set[str] = frozenset(),
         offer_leave: bool = False,
+        allow_steps: bool = True,
     ) -> Route:
         """``exclude`` drops tools from the Choice; ``offer_leave`` adds an option meaning "nothing
         in-place fits, this needs another app or page" (route.kind "leave")."""
@@ -145,6 +165,14 @@ class JevRouter:
             "intent": Choice(
                 instructions=(
                     "The user spoke `utterance` to a voice assistant that controls this Mac. "
+                    "`conversation` is this session so far, oldest first: the user works on one task over "
+                    "several turns, so read `utterance` as the next step of that task. Resolve follow-ups, "
+                    "corrections ('no, I meant...', 'not that one') and references ('it', 'that song', 'the "
+                    "other one', 'again', 'the same in Notes') against it, and stay on that task unless the "
+                    "user clearly starts a new one. 'Play it', 'play that', 'open that one' right after the "
+                    "conversation was about a specific song, item or result means that item, not resuming "
+                    "whatever was playing. A question about what is on screen ('what songs can you "
+                    "see', 'is X on this page') is about the app or page in front, not about what is playing. "
                     "`frontmost_app` is the app currently in focus and `running_apps` are open. "
                     "`open_in_frontmost_app` is what the user is working on right now (the note, tab, folder, "
                     "document or message open there); `recently_worked_on` is what was open in other apps "
@@ -188,6 +216,17 @@ class JevRouter:
                 )
         if any(t.runner == "browser" for t in tools):
             questions.update(_web_goal_questions())
+        splits = _step_splits(utterance) if allow_steps and not offer_leave and not awaiting_confirmation else {}
+        if splits:
+            questions["steps"] = Choice(
+                instructions=(
+                    "Is `utterance` one request, or several actions to do one after another? A name, title or "
+                    "list that contains 'and' ('rock and roll', 'Tom and Jerry', 'milk and eggs') is one "
+                    "request. Two different things to do ('open Spotify and play Dynamite', 'search for X "
+                    "then play the first one') are separate steps: pick how to split them."
+                ),
+                criteria={SINGLE: "It is one request", **{k: v[1] for k, v in splits.items()}},
+            )
         questions["explicit_elsewhere"] = Noul(
             instructions=(
                 "The user is in `frontmost_app` (on `open_in_frontmost_app`). Does `utterance` EXPLICITLY point "
@@ -231,7 +270,9 @@ class JevRouter:
                 criteria={"true": "no, cancel, stop, never mind, don't", "false": "anything else"},
             )
 
-        resp = await self.client.system_one(state=_state(utterance, ctx, recent_browser), questions=questions)
+        resp = await self.client.system_one(
+            state=_state(utterance, ctx, recent_browser, self._conversation()), questions=questions
+        )
         intent = resp.choices["intent"]
         route = Route(
             kind="tool",
@@ -245,6 +286,10 @@ class JevRouter:
         if recent_browser:
             route.browser_followup = float(resp.nouls["browser_followup"].noul)
         route.explicit_elsewhere = float(resp.nouls["explicit_elsewhere"].noul)
+        if splits:
+            steps = resp.choices["steps"]
+            if steps.choice in splits and steps.confidence >= STEPS_MIN_CONFIDENCE:
+                route.steps = splits[steps.choice][0]
         if awaiting_confirmation:
             route.is_confirmation = float(resp.nouls["confirm"].noul)
             route.is_denial = float(resp.nouls["deny"].noul)
@@ -320,13 +365,17 @@ class JevRouter:
     async def _fill_text_args(
         self, utterance: str, ctx: MacContext, tool: Tool, specs: list[Any], route: Route
     ) -> None:
-        """Select-not-generate: Jev picks which span of the utterance is the argument."""
-        candidates = _span_candidates(utterance, MAX_TEXT_CANDIDATES)
-        if not candidates:
+        """Select-not-generate: Jev picks which span of the utterance is the argument, or, when the
+        utterance refers back ("play it"), a value from earlier in the session."""
+        recall = self.memory.values() if self.memory else []
+        candidates = _span_candidates(utterance, MAX_TEXT_CANDIDATES - min(len(recall), MAX_RECALL))
+        if not candidates and not recall:
             for spec in specs:
                 route.args[spec.name] = spec.default or utterance
             return
-        crit = {c: None for c in candidates}
+        crit: dict[str, str | None] = {c: None for c in candidates}
+        for value in recall[:MAX_RECALL]:
+            crit.setdefault(value, "from earlier in this conversation")
         crit["__none__"] = "No part of the utterance is this argument"
         questions = {
             spec.name: Choice(
@@ -335,12 +384,16 @@ class JevRouter:
                     spec.instructions,
                     "Choose the option that is exactly and only that value, copied from `utterance`, "
                     "without leading command words like 'open', 'search for', 'say', or 'that says'.",
+                    "If `utterance` refers back to something from `conversation` ('it', 'that song', 'the "
+                    "same one', 'again'), choose the option marked 'from earlier' that names it.",
                 ],
                 criteria=crit,
             )
             for spec in specs
         }
-        resp = await self.client.system_one(state=_state(utterance, ctx), questions=questions)
+        resp = await self.client.system_one(
+            state=_state(utterance, ctx, conversation=self._conversation()), questions=questions
+        )
         for spec in specs:
             ans = resp.choices[spec.name]
             if ans.choice == "__none__" and spec.optional:
@@ -348,8 +401,9 @@ class JevRouter:
                 continue  # leaving an optional slot empty is never a reason to ask back
             value = ans.choice if ans.choice != "__none__" else (spec.default or utterance)
             route.args[spec.name] = _clean_value(value)
-            if route.weakest_arg is None or ans.confidence < route.weakest_arg[1]:
-                route.weakest_arg = (spec.name, float(ans.confidence))
+            conf = _span_confidence(ans.choice, ans.probabilities) if ans.choice != "__none__" else ans.confidence
+            if route.weakest_arg is None or conf < route.weakest_arg[1]:
+                route.weakest_arg = (spec.name, float(conf))
 
 
 def _web_goal_questions() -> dict[str, Any]:
@@ -399,6 +453,27 @@ def _web_goal_questions() -> dict[str, Any]:
     }
 
 
+def _step_splits(utterance: str, max_options: int = 20) -> dict[str, tuple[list[str], str]]:
+    """Ways to cut ``utterance`` into consecutive commands at 'and' / 'then' / 'after that'.
+    Returns {option key: (steps, description)}; empty when there is nothing to cut at."""
+    text = utterance.strip().rstrip(".!?")
+    cuts = [m for m in _JOINER.finditer(text) if m.start() > 0 and m.end() < len(text)]
+    options: dict[str, tuple[list[str], str]] = {}
+
+    def add(parts: list[str]) -> None:
+        parts = [p.strip(" ,") for p in parts]
+        if all(len(p) >= 2 for p in parts) and len(options) < max_options:
+            desc = f"{len(parts)} steps: " + " then ".join(f"{i + 1}) '{p}'" for i, p in enumerate(parts))
+            options[f"split_{len(options) + 1}"] = (parts, desc)
+
+    for m in cuts:
+        add([text[: m.start()], text[m.end() :]])
+    for i, a in enumerate(cuts):
+        for b in cuts[i + 1 :]:
+            add([text[: a.start()], text[a.end() : b.start()], text[b.end() :]])
+    return options
+
+
 _WORD_RE = re.compile(r"\S+")
 
 
@@ -428,6 +503,20 @@ def _span_candidates(utterance: str, max_candidates: int = 200) -> list[str]:
                 return spans
             add(i, i + length)
     return spans
+
+
+def _span_confidence(choice: str, probabilities: dict[str, float]) -> float:
+    """How sure Jev is about the value, counting wordings of the same thing together: 'a dynamite
+    song' 0.42, 'dynamite' 0.24 and 'dynamite song' 0.22 are 0.88 for "dynamite", not a toss-up."""
+    words = f" {choice.lower()} "
+    total = 0.0
+    for option, p in probabilities.items():
+        if option == "__none__":
+            continue
+        other = f" {option.lower()} "
+        if other in words or words in other:
+            total += p
+    return min(1.0, total)
 
 
 def _clean_value(v: str) -> str:

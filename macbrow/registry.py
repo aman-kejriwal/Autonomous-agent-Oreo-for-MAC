@@ -64,6 +64,11 @@ MOVES_PATTERNS = re.compile(
 )
 
 
+# The part of MOVES_PATTERNS that opens something new (a tab, window, URL) rather than just
+# bringing the tool's own app forward.
+OPENS_NEW = re.compile(r"(open location|open\s+-n?a\b|make new (window|tab|document)|set URL of)", re.IGNORECASE)
+
+
 @dataclass
 class ArgSpec:
     name: str
@@ -103,6 +108,8 @@ class Tool:
     moves: bool = False  # takes the user to another app/page (see module docstring)
     stays_on: str | None = None  # ...except when the page in front is on this host
     moves_args: dict[str, list[str]] = field(default_factory=dict)  # moves only for these arg values
+    front_only: list[str] = field(default_factory=list)  # offered only while one of these apps is in front
+    superseded_by: str | None = None  # a learned tool a better tool now covers: kept on file, not offered
 
     @property
     def blocked_by(self) -> list[str]:
@@ -114,8 +121,15 @@ class Tool:
     def blocked(self) -> bool:
         return bool(self.blocked_by)
 
+    @property
+    def opens_new(self) -> bool:
+        """Opens a new tab, window or page, even when its app is already in front."""
+        return bool(OPENS_NEW.search(self.script))
+
     def is_available(self, ctx: MacContext) -> bool:
-        if self.blocked:
+        if self.blocked or self.superseded_by:
+            return False
+        if self.front_only and ctx.active_app.lower() not in {a.lower() for a in self.front_only}:
             return False
         if self.scope is None:
             return True
@@ -169,6 +183,8 @@ class Tool:
             moves=bool(d["moves"]) if "moves" in d else bool(MOVES_PATTERNS.search(d["script"])),
             stays_on=d.get("stays_on"),
             moves_args=dict(d.get("moves_args") or {}),
+            front_only=list(d.get("front_only") or []),
+            superseded_by=d.get("superseded_by"),
         )
 
     def to_dict(self) -> dict[str, Any]:
