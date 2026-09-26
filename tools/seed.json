@@ -82,6 +82,7 @@
   },
   {
     "name": "search_here",
+    "say": "search in this app",
     "description": "Search for something inside the app or website the user is on right now: the site open in the browser tab (YouTube, Amazon, GitHub... in the same tab) or the front app's own search (Spotify, Notes, Mail, Finder, a web app...).",
     "scope": null,
     "args": [
@@ -111,6 +112,7 @@
   },
   {
     "name": "open_result",
+    "say": "open one of the results",
     "description": "Open or play result number N (the first, second, third...) listed on the web page in front in Chrome or Safari, in the same tab: a video in YouTube results, a search result, a product in a list.",
     "scope": null,
     "args": [
@@ -169,11 +171,13 @@
   },
   {
     "name": "type_here",
+    "say": "type it",
     "description": "Type dictated text wherever the cursor is in the front app (a text box, search field, document), without pressing Enter.",
     "scope": null,
     "args": [
       {
         "name": "text",
+        "verbatim": true,
         "kind": "text",
         "instructions": "The exact words to type, without command words like 'type' or 'write'."
       }
@@ -190,6 +194,7 @@
   },
   {
     "name": "app_action",
+    "say": "use one of the app's shortcuts",
     "description": "Do a common action in the app or page in front: play/pause, next or previous video or song, go back or forward, reload, new item, new or close or switch tab, undo, redo, find, save, zoom, scroll, jump to top or bottom.",
     "scope": null,
     "args": [
@@ -245,7 +250,8 @@
   },
   {
     "name": "ui_press",
-    "description": "Open, select, press or play something by its name inside the app in front, using the app's real on-screen controls: a song or item shown in a list (play Butter), a sidebar or library item, playlist, section, tab, button or menu command (Liked Songs in Spotify, Inbox in Mail, Settings, New Playlist). Also 'play it' / 'play that one' right after talking about an item that is on screen.",
+    "say": "press something on the screen",
+    "description": "Open, select, press or play something by its name inside the app in front, using the app's real on-screen controls: a song or item shown in a list (play Butter), a sidebar or library item, playlist, section, tab, button or menu command (Liked Songs in Spotify, Inbox in Mail, Settings, New Playlist), or a link or button on the web page in front by its name (the Docs link, Sign up, a video title), or put the cursor in a text box by its name (go to the Subject field, the To box, the message body, the search box). Also 'play it' / 'play that one' right after talking about an item that is on screen.",
     "scope": null,
     "runner": "ui",
     "args": [],
@@ -264,6 +270,7 @@
   },
   {
     "name": "read_screen",
+    "say": "read what's on the screen",
     "description": "Answer a question about what is visible in the app or page in front right now: which songs, items, messages, results or buttons are showing, whether something is on screen, what a list or page contains.",
     "scope": null,
     "runner": "ui_read",
@@ -299,6 +306,7 @@
     "args": [
       {
         "name": "message",
+        "verbatim": true,
         "kind": "text",
         "instructions": "The exact message text the user wants displayed in the notification."
       }
@@ -577,6 +585,7 @@
   },
   {
     "name": "web_task",
+    "say": "do it step by step in Chrome",
     "description": "Carry out a multi-step task inside a website in Chrome: search on a site and pick a result, add something to a cart or list, fill in a form, draft an email, find and read a specific thing on a page.",
     "scope": null,
     "runner": "browser",
@@ -688,6 +697,7 @@
       },
       {
         "name": "body",
+        "verbatim": true,
         "kind": "text",
         "optional": true,
         "instructions": "The text the user wants written into the new note, apart from its name."
@@ -730,6 +740,7 @@
     "args": [
       {
         "name": "text",
+        "verbatim": true,
         "kind": "text",
         "instructions": "The words to write into the note, without command words like 'write' or 'add'."
       }

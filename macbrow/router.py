@@ -400,7 +400,7 @@ class JevRouter:
                 route.args[spec.name] = spec.default or ""
                 continue  # leaving an optional slot empty is never a reason to ask back
             value = ans.choice if ans.choice != "__none__" else (spec.default or utterance)
-            route.args[spec.name] = _clean_value(value)
+            route.args[spec.name] = _as_said(value, utterance) if spec.verbatim else _clean_value(value)
             conf = _span_confidence(ans.choice, ans.probabilities) if ans.choice != "__none__" else ans.confidence
             if route.weakest_arg is None or conf < route.weakest_arg[1]:
                 route.weakest_arg = (spec.name, float(conf))
@@ -430,11 +430,15 @@ def _web_goal_questions() -> dict[str, Any]:
                 "Would carrying out `utterance` on a website require the assistant ITSELF to place an order or pay, "
                 "sign in or enter credentials, or change account settings? Browsing, searching, comparing prices, "
                 "reading, filtering, opening product pages and adding to a cart do NOT count, even if the user "
-                "mentions wanting to buy something eventually."
+                "mentions wanting to buy something eventually. Neither does using a site the user is already "
+                "signed into: writing or sending an email or message, replying, commenting, posting or filling "
+                "in a form (those are confirmed with the user separately)."
             ),
             criteria={
-                "true": "The task cannot be completed without a purchase/payment, a sign-in, or an account change",
-                "false": "It is research, navigation, search, reading, or cart-building; no money or credentials involved",
+                "true": "The task cannot be completed without a purchase/payment, entering a password or login, "
+                "or changing account settings",
+                "false": "It is research, navigation, search, reading, cart-building, or writing, sending or "
+                "filling in something on a site the user already uses; no money or credentials involved",
             },
         ),
         "web_goal_missing": Choice(
@@ -503,6 +507,23 @@ def _span_candidates(utterance: str, max_candidates: int = 200) -> list[str]:
                 return spans
             add(i, i + length)
     return spans
+
+
+_CLOSING = re.compile(r"[.!?…]+")
+
+
+def _as_said(value: str, utterance: str) -> str:
+    """Dictated text as it was said. Spans are offered without their closing punctuation (so a
+    name can be picked out of a sentence); when the chosen words run to the end of the utterance,
+    its closing ".", "!" or "?" belongs to them: "...Please ignore." is typed with its period."""
+    value = value.strip()
+    said = utterance.strip()
+    at = said.rfind(value) if value else -1
+    if at < 0:
+        return value
+    rest = said[at + len(value) :]
+    closing = _CLOSING.fullmatch(rest)
+    return value + closing.group(0) if closing else value
 
 
 def _span_confidence(choice: str, probabilities: dict[str, float]) -> float:

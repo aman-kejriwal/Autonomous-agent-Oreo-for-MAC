@@ -158,7 +158,68 @@ class BrowserResult:
             return f"I got stuck after {self.steps} steps.{where} Take a look."
         if self.status == "timeout":
             return f"I ran out of time after {self.steps} steps.{where}"
-        return f"I couldn't drive Chrome: {self.error}"
+        return f"I couldn't drive Chrome. {self.error}"
+
+
+# ----------------------------------------------------------------------------- connecting
+# Browser tasks drive Chrome over its remote-debugging connection. Since Chrome 144 the user allows
+# that per browser run, on this page, so it is off again after every Chrome restart.
+REMOTE_DEBUGGING_PAGE = "chrome://inspect/#remote-debugging"
+DEVTOOLS_PORT_FILE = chrome.LOCAL_STATE.parent / "DevToolsActivePort"  # Chrome writes it while it's on
+NO_REMOTE_DEBUGGING = (
+    "Longer tasks in Chrome need its remote debugging, which is off. I opened the setting in a new tab: "
+    "tick Allow remote debugging for this browser instance, click Allow, then ask me again."
+)
+
+
+ALLOW_POPUP = (
+    "Chrome didn't accept my connection. If it shows an Allow remote debugging popup, click Allow, then ask me again."
+)
+CANT_READ_PORT_FILE = (
+    "Chrome's remote debugging is on, but macOS won't let me read Chrome's connection file. "
+    "Start me from the regular Terminal app, not from inside another tool's sandbox, "
+    "or give Terminal Full Disk Access in System Settings, Privacy and Security."
+)
+
+
+def chrome_connection() -> str:
+    """Can a browser task connect to Chrome right now? "ok"; "off" when remote debugging isn't
+    allowed (Chrome keeps a port file only while it is); "unreadable" when it is on but this process
+    may not read that file (a sandbox, macOS privacy), which the connection itself needs. Instant,
+    instead of waiting ~10 s for a connection that can't come."""
+    if os.environ.get("BU_CDP_WS") or os.environ.get("BU_CDP_URL"):  # a remote browser is configured
+        return "ok"
+    try:
+        port = DEVTOOLS_PORT_FILE.read_text().split("\n", 1)[0].strip()
+    except FileNotFoundError:
+        return "off"
+    except OSError:  # PermissionError: "Operation not permitted"
+        return "unreadable"
+    return "ok" if port.isdigit() else "off"
+
+
+def chrome_connectable() -> bool:
+    return chrome_connection() == "ok"
+
+
+def explain_connect_error(e: BaseException | str) -> str:
+    """What to say when connecting to Chrome failed: what is wrong and what fixes it, never the raw
+    exception ("daemon default didn't come up -- check ~/.config/...")."""
+    msg = str(e).lower()
+    if "permission-blocked" in msg or "allow remote debugging?" in msg:
+        return ALLOW_POPUP
+    # The helper words most failures alike ("daemon default didn't come up"); what is actually
+    # wrong is read off Chrome's state, so the advice never says "turn it on" when it is on.
+    state = chrome_connection()
+    if "operation not permitted" in msg or state == "unreadable":
+        return CANT_READ_PORT_FILE
+    if state == "off":
+        return NO_REMOTE_DEBUGGING
+    if any(s in msg for s in ("remote-debugging-setup", "devtoolsactiveport", "didn't come up", "not live yet")):
+        return ALLOW_POPUP  # on, readable, yet refused: Chrome is waiting for this connection's Allow
+    if "timed out" in msg or isinstance(e, TimeoutError):
+        return "Chrome didn't accept the connection in time. Try again in a moment."
+    return _short(e) if isinstance(e, BaseException) else e[:140]
 
 
 # ----------------------------------------------------------------------------- text helper
@@ -536,11 +597,11 @@ def run_task_sync(
     started = time.perf_counter()
     try:
         agent = _with_timeout(lambda: Agent(url, goal), CONNECT_TIMEOUT_S)
-    except TimeoutError:
-        return BrowserResult("error", 0, 0, error="Chrome didn't accept the remote-debugging connection in time.")
+    except TimeoutError as e:
+        return BrowserResult("error", 0, 0, error=explain_connect_error(e))
     except Exception as e:  # daemon / CDP failures
         log.exception("browser connect failed")
-        return BrowserResult("error", 0, 0, error=_short(e))
+        return BrowserResult("error", 0, 0, error=explain_connect_error(e))
     state: dict[str, Any] = agent.state
     status, error = "timeout", ""
     last_report = time.perf_counter()

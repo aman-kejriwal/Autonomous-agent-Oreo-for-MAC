@@ -118,3 +118,14 @@ def test_media_query_drops_filler_words():
     assert _media_query("the butter song by BTS") == "butter song by BTS"  # only leading/trailing filler
     assert _media_query("some lo-fi music") == "lo-fi"
     assert _media_query("song") == "song"  # never empty
+
+
+def test_questions_name_tools_briefly():
+    # Found sending a test mail: "Did you want do a common action in the app or page in front or
+    # open, select, press or play something by its name inside the app in front, using ...?"
+    from macbrow.agent import _say_tool
+
+    reg = ToolRegistry()
+    question = f"Did you want to {_say_tool(reg.get('app_action'))} or {_say_tool(reg.get('ui_press'))}?"
+    assert question == "Did you want to use one of the app's shortcuts or press something on the screen?"
+    assert _say_tool(reg.get("set_volume")).startswith("change the Mac's output volume")  # no short name: first clause

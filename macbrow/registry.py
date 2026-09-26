@@ -78,6 +78,9 @@ class ArgSpec:
     dynamic: DynamicSource | None = None
     default: str | None = None
     optional: bool = False  # text slot the user may leave out: empty instead of the whole utterance
+    # Dictated words typed or written as said: their punctuation is kept and " dot " stays a word.
+    # Other text slots (names, URLs, queries) are tidied: "github dot com." -> "github.com".
+    verbatim: bool = False
 
     def resolve_criteria(self, ctx: MacContext) -> dict[str, str | None]:
         if self.dynamic == "running_apps":
@@ -107,6 +110,7 @@ class Tool:
     runner: str = "applescript"  # "applescript" | "browser" (jev-ultrafast web task; script unused)
     moves: bool = False  # takes the user to another app/page (see module docstring)
     stays_on: str | None = None  # ...except when the page in front is on this host
+    say: str | None = None  # how a question names it ("press something on the screen")
     moves_args: dict[str, list[str]] = field(default_factory=dict)  # moves only for these arg values
     front_only: list[str] = field(default_factory=list)  # offered only while one of these apps is in front
     superseded_by: str | None = None  # a learned tool a better tool now covers: kept on file, not offered
@@ -182,6 +186,7 @@ class Tool:
             runner=d.get("runner", "applescript"),
             moves=bool(d["moves"]) if "moves" in d else bool(MOVES_PATTERNS.search(d["script"])),
             stays_on=d.get("stays_on"),
+            say=d.get("say"),
             moves_args=dict(d.get("moves_args") or {}),
             front_only=list(d.get("front_only") or []),
             superseded_by=d.get("superseded_by"),

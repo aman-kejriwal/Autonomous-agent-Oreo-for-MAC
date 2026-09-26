@@ -183,3 +183,53 @@ def test_flights_start_url_uses_natural_language_query():
     assert url.startswith("https://www.google.com/travel/flights?hl=en&q=")
     assert "Paris" in url and "Nov+2" in url and "Additional" not in url
     assert start_url_for("amazon", goal) == "https://www.amazon.com/"
+
+
+def test_script_errors_are_said_as_what_to_fix():
+    from macbrow.agent import _explain_script_error
+
+    said = _explain_script_error(
+        "execution error: Not authorized to send Apple events to Google Chrome. (-1743)", "Google Chrome"
+    )
+    assert "Google Chrome" in said and "Automation" in said
+    assert "Accessibility" in _explain_script_error(
+        "System Events got an error: osascript is not allowed assistive access. (-1719)", "Notes"
+    )
+    assert (
+        _explain_script_error("execution error: Spotify got an error: Application isn't running. (-600)", "Spotify")
+        == "Spotify isn't running."
+    )
+    # anything else: osascript's words without its prefix and error number
+    assert _explain_script_error('execution error: Can\'t get note "x". (-1728)', "Notes") == 'Can\'t get note "x".'
+
+
+def test_browser_connect_errors_are_said_as_what_to_fix(tmp_path, monkeypatch):
+    from macbrow import browser_task as bt
+
+    monkeypatch.delenv("BU_CDP_WS", raising=False)
+    monkeypatch.delenv("BU_CDP_URL", raising=False)
+    port = tmp_path / "DevToolsActivePort"
+    monkeypatch.setattr(bt, "DEVTOOLS_PORT_FILE", port)
+    raw = "daemon default didn't come up -- check /Users/x/.config/browser-harness/tmp/bu-default.log"
+    # The same helper message means different things; the advice follows Chrome's actual state.
+    assert bt.explain_connect_error(RuntimeError(raw)) == bt.NO_REMOTE_DEBUGGING  # off: the first report
+    port.write_text("9222\n/devtools/browser/x")
+    assert bt.explain_connect_error(RuntimeError(raw)) == bt.ALLOW_POPUP  # on, yet refused
+    assert bt.explain_connect_error(RuntimeError("fatal: [Errno 1] Operation not permitted: '...'")) == (
+        bt.CANT_READ_PORT_FILE  # the second report: on, but unreadable for this process
+    )
+    assert bt.explain_connect_error(RuntimeError("permission-blocked: Chrome did not approve")) == bt.ALLOW_POPUP
+
+
+def test_chrome_connectable_reads_chromes_port_file(tmp_path, monkeypatch):
+    from macbrow import browser_task
+
+    monkeypatch.delenv("BU_CDP_WS", raising=False)
+    monkeypatch.delenv("BU_CDP_URL", raising=False)
+    monkeypatch.setattr(browser_task, "DEVTOOLS_PORT_FILE", tmp_path / "DevToolsActivePort")
+    assert browser_task.chrome_connection() == "off"
+    (tmp_path / "DevToolsActivePort").write_text("9222\n/devtools/browser/x")
+    assert browser_task.chrome_connection() == "ok"
+    (tmp_path / "DevToolsActivePort").chmod(0)  # on, but this process may not read it
+    assert browser_task.chrome_connection() == "unreadable"
+    assert not browser_task.chrome_connectable()

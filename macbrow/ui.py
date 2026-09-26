@@ -19,7 +19,8 @@ import re
 import subprocess
 import time
 import unicodedata
-from dataclasses import dataclass, field
+import urllib.parse
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 log = logging.getLogger("macbrow.ui")
@@ -55,7 +56,13 @@ ROLE_NAMES = {
     "AXRadioButton": "tab",
     "AXCheckBox": "checkbox",
     "AXDisclosureTriangle": "expander",
+    "AXTextField": "text box",
+    "AXTextArea": "text box",
+    "AXComboBox": "text box",
+    "AXSearchField": "search box",
 }
+# Where typed text goes. "Pressing" one puts the cursor in it ("go to the subject field").
+TEXT_BOX_ROLES = {"AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"}
 # Pressing one of these changes something that can't be taken back: always confirm by voice.
 DANGEROUS = re.compile(
     r"\b(delete|remove|erase|trash|send|post|publish|share|pay|buy|purchase|order|checkout|subscribe|"
@@ -73,6 +80,15 @@ class Element:
     ref: Any = field(repr=False, compare=False, default=None)  # AXUIElement
     in_menu: bool = False
     actions: tuple[str, ...] = ()
+    url: str = ""  # where a web link goes
+    top: float = field(default=0.0, compare=False)  # screen position, for "the first one" on a page
+    left: float = field(default=0.0, compare=False)
+    bottom: float = field(default=0.0, compare=False)
+    in_page: bool = False  # part of a web page (not the browser's own tabs and toolbar)
+    in_page_nav: bool = False  # in the page's navigation, header or footer, not its content
+    in_main: bool = False  # in the page's main content area
+    heading: bool = False  # a heading's link (how most sites set a result's title)
+    offscreen: int = 0  # page elements read beyond the view: 1 further down, -1 scrolled past, 2 sideways
 
     @property
     def kind(self) -> str:
@@ -108,6 +124,7 @@ class Snapshot:
     window: str
     elements: list[Element]
     elapsed_ms: float
+    url: str = ""  # the web page in front, in a browser
 
 
 # ------------------------------------------------------------------------------ reading
@@ -117,18 +134,47 @@ def _ax():
     return AS
 
 
+NOT_TRUSTED = (
+    "I can't see any app's controls: the Accessibility permission is off for the app running me. "
+    "Turn it on in System Settings, Privacy and Security, Accessibility, then restart me."
+)
+
+
+def trusted() -> bool:
+    """Has macOS given this process the Accessibility permission (without it every window reads empty)?"""
+    return bool(_ax().AXIsProcessTrusted())
+
+
 def _get(el: Any, attr: str) -> Any:
     err, value = _ax().AXUIElementCopyAttributeValue(el, attr, None)
     return value if err == 0 else None
 
 
+# Invisible text-direction marks that labels carry (Gmail's "Send ‪(⌘Enter)‬").
+_INVISIBLE = re.compile("[​-‏‪-‮⁦-⁩﻿]")
+
+
 def _clean(text: Any) -> str:
-    s = unicodedata.normalize("NFKC", str(text or "")).replace("\n", " ").strip()
-    return re.sub(r"\s+", " ", s)[:90]
+    s = unicodedata.normalize("NFKC", str(text or "")).replace("\n", " ")
+    return re.sub(r"\s+", " ", _INVISIBLE.sub("", s)).strip()[:90]
+
+
+# A keyboard-shortcut hint at the end of a control's name: "Send (⌘Enter)", "Bold (Ctrl+B)".
+_SHORTCUT_HINT = re.compile(
+    r"\s*\((?:[⌘⌥⇧⌃]|(?:cmd|ctrl|control|alt|option|shift|command)\b)[^()]{0,24}\)\s*$", re.IGNORECASE
+)
+
+
+def spoken_name(label: str) -> str:
+    """A control's name as it should be heard: without a trailing shortcut hint."""
+    return _SHORTCUT_HINT.sub("", label).strip() or label
 
 
 def _label(el: Any, role: str) -> str:
-    for attr in ("AXTitle", "AXDescription", "AXHelp"):
+    attrs = ("AXTitle", "AXDescription", "AXHelp")
+    if role in TEXT_BOX_ROLES:  # an empty box is named by its hint ("Subject", "Search mail")
+        attrs += ("AXPlaceholderValue",)
+    for attr in attrs:
         v = _clean(_get(el, attr))
         if v:
             return v
@@ -221,6 +267,42 @@ CHROMIUM_BROWSERS = {
     "comet",
     "dia",
 }
+BROWSER_APPS = CHROMIUM_BROWSERS | {"safari"}
+
+
+def _frame(el: Any) -> tuple[float, float, float, float] | None:
+    """(x, y, width, height) on screen."""
+    pos, size = _get(el, "AXPosition"), _get(el, "AXSize")
+    if pos is None or size is None:
+        return None
+    ok_p, point = _ax().AXValueGetValue(pos, _ax().kAXValueCGPointType, None)
+    ok_s, dims = _ax().AXValueGetValue(size, _ax().kAXValueCGSizeType, None)
+    return (point.x, point.y, dims.width, dims.height) if ok_p and ok_s else None
+
+
+MIN_VISIBLE_PX = 6  # less of an element than this showing: the user can't see it
+# The parts of a page around its content (menus, sidebars, header, footer): never "a result".
+PAGE_FRAME_LANDMARKS = {"AXLandmarkNavigation", "AXLandmarkBanner", "AXLandmarkContentInfo"}
+
+
+def outside(frame: tuple[float, float, float, float], view: tuple[float, float, float, float]) -> bool:
+    """A frame that lies out of ``view`` (scrolled away). Chrome doesn't report where such an
+    element really is: it squeezes it onto the edge of the view, 1 pixel high above it and 0
+    below. Other zero-size frames are wrappers whose children can still show: not outside."""
+    x, y, w, h = frame
+    vx, vy, vw, vh = view
+    if (h <= 1 and (y <= vy or y + h >= vy + vh)) or (w <= 1 and (x <= vx or x + w >= vx + vw)):
+        return True
+    if w <= 0 or h <= 0:
+        return False
+    return x + w <= vx or x >= vx + vw or y + h <= vy or y >= vy + vh
+
+
+def _url(el: Any) -> str:
+    u = _get(el, "AXURL")
+    if u is None:
+        return ""
+    return str(u.absoluteString()) if hasattr(u, "absoluteString") else str(u)
 
 
 def web_areas(win: Any, max_depth: int = 30) -> list[Any]:
@@ -240,6 +322,36 @@ def web_areas(win: Any, max_depth: int = 30) -> list[Any]:
     return found
 
 
+def main_page(pages: list[Any]) -> Any:
+    """The web page a browser window shows, among its web areas. Chrome keeps internal ones in
+    every window (chrome://newtab-footer/), which can have more elements than a page still
+    loading: a real, visible web page wins, then the one with the most in it."""
+
+    def rank(w: Any) -> tuple[bool, bool, int]:
+        frame = _frame(w)
+        return (
+            _url(w).startswith(("http://", "https://")),
+            frame is not None and frame[2] > 0 and frame[3] > 0,
+            len(_get(w, "AXChildren") or []),
+        )
+
+    return max(pages, key=rank)
+
+
+def page_url(app_name: str) -> str:
+    """The address of the page in the browser's front window. "" while there is none to speak of:
+    mid-navigation Chrome can show only its hidden internal pages (chrome://newtab-footer/)."""
+    app = _app_element(app_name)
+    win = _front_window(app, wake=False) if app is not None else None
+    pages = web_areas(win) if win is not None else []
+    if not pages:
+        return ""
+    page = main_page(pages)
+    url, frame = _url(page), _frame(page)
+    shown = frame is not None and frame[2] > 0 and frame[3] > 0
+    return url if url.startswith(("http://", "https://")) or shown else ""
+
+
 def _page_missing(win: Any) -> bool:
     return not any(len(_get(w, "AXChildren") or []) > 0 for w in web_areas(win))
 
@@ -248,7 +360,7 @@ def _front_window(app: Any, wake: bool = True, app_name: str = "") -> Any | None
     win = _get(app, "AXFocusedWindow") or next(iter(_get(app, "AXWindows") or []), None)
     if win is None or not wake:
         return win
-    browser = app_name.lower() in CHROMIUM_BROWSERS
+    browser = app_name.lower() in BROWSER_APPS  # Safari too builds a page's tree on first request
     asleep = (lambda w: _page_missing(w)) if browser else _looks_empty
     if not asleep(win):
         return win
@@ -263,42 +375,165 @@ def _front_window(app: Any, wake: bool = True, app_name: str = "") -> Any | None
     return win
 
 
-def snapshot(app_name: str, include_menus: bool = True, max_nodes: int = MAX_NODES) -> Snapshot | None:
-    """Pressable elements of ``app_name``'s focused window (plus its menu commands)."""
+def hide_covered(elements: list[Element], header_bottom: float, in_header: set[int]) -> list[Element]:
+    """Drop page elements that sit under a header pinned to the top of the page (all but a few
+    pixels of them hidden). The header's own controls stay."""
+    if not header_bottom:
+        return elements
+    return [
+        e
+        for i, e in enumerate(elements)
+        if i in in_header or not e.in_page or e.offscreen or e.bottom - max(e.top, header_bottom) >= MIN_VISIBLE_PX
+    ]
+
+
+def _has_heading(link: Any) -> bool:
+    return any(_get(kid, "AXRole") == "AXHeading" for kid in (_get(link, "AXChildren") or [])[:4])
+
+
+@dataclass(frozen=True)
+class _Where:
+    """Where on a page the walk is (what every element below inherits)."""
+
+    view: tuple | None = None  # the visible area of the page, on screen
+    in_page: bool = False
+    header: bool = False  # inside a header pinned to the top of the view
+    nav: bool = False
+    main: bool = False
+    heading: bool = False
+    offscreen: int = 0
+
+
+SIDE_VISIBLE_PX = 40  # a card cut off at the side of the view (a carousel) shows at least this much to count
+
+
+def shows(frame: tuple, view: tuple | None) -> bool:
+    """Does enough of an element show in ``view`` for the user to see it? Safari reports a card
+    that a carousel has pushed past the edge at its real place, a sliver of it inside the view."""
+    seen = _intersect(frame, view)
+    return seen[2] >= min(frame[2], SIDE_VISIBLE_PX) and seen[3] >= MIN_VISIBLE_PX and seen[2] >= MIN_VISIBLE_PX
+
+
+def _intersect(a: tuple | None, b: tuple | None) -> tuple | None:
+    """The part two screen rectangles share (either one when the other is unknown)."""
+    if a is None or b is None:
+        return a or b
+    x, y = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[0] + a[2], b[0] + b[2]), min(a[1] + a[3], b[1] + b[3])
+    return (x, y, max(0.0, x2 - x), max(0.0, y2 - y))
+
+
+def _direction(frame: tuple, view: tuple) -> int:
+    """Where an element out of ``view`` is: 1 further down, -1 scrolled past, 2 sideways."""
+    x, y, w, h = frame
+    vx, vy, vw, vh = view
+    if y >= vy + vh - 1:
+        return 1
+    if y + h <= vy + 1:
+        return -1
+    return 2
+
+
+def snapshot(
+    app_name: str, include_menus: bool = True, max_nodes: int = MAX_NODES, whole_page: bool = False
+) -> Snapshot | None:
+    """Pressable elements of ``app_name``'s focused window (plus its menu commands).
+
+    In a browser the page is read too, but only the part showing in the window: what is scrolled
+    away is skipped (a long page would otherwise use up the walk budget before its top is read),
+    and each link keeps its address and screen position so "the first video" means the first one
+    the user sees. ``whole_page`` reads the rest of the page as well, marking where it is."""
     AS = _ax()
     t0 = time.perf_counter()
     app = _app_element(app_name)
     if app is None:
         return None
     win = _front_window(app, app_name=app_name)
+    browser = app_name.lower() in BROWSER_APPS
     elements: list[Element] = []
     budget = [max_nodes]
     noise: set[str] = set()
+    # A page header pinned to the top of the view (YouTube's bar with the search box) covers what
+    # scrolls under it: its bottom edge, and which elements are its own.
+    headers: list[float] = []
+    in_header: set[int] = set()
 
-    def walk(el: Any, path: tuple[str, ...], depth: int) -> None:
+    def walk(el: Any, path: tuple[str, ...], depth: int, at: _Where) -> None:
         if budget[0] <= 0 or depth > MAX_DEPTH:
             return
         budget[0] -= 1
         role = _get(el, "AXRole") or ""
+        frame = _frame(el) if browser else None
+        if at.in_page and not at.offscreen and frame and at.view and outside(frame, at.view):
+            if not whole_page:
+                return
+            at = replace(at, offscreen=_direction(frame, at.view))
+        if browser and not at.in_page and role == "AXScrollArea" and frame:
+            # Safari's page is as long as its content; what shows is the scroll area around it.
+            at = replace(at, view=_intersect(frame, at.view))
+        if browser and role == "AXWebArea":
+            at = replace(at, in_page=True, view=_intersect(frame, at.view))  # the page's visible part
+        if at.in_page:
+            subrole = _get(el, "AXSubrole") or ""
+            if subrole in PAGE_FRAME_LANDMARKS:
+                at = replace(at, nav=True)
+            elif subrole == "AXLandmarkMain":
+                at = replace(at, main=True)
+            if frame and at.view and not at.header and subrole == "AXLandmarkBanner" and not at.offscreen:
+                if frame[1] <= at.view[1] + 2 and frame[3] > MIN_VISIBLE_PX:  # at the top of the view
+                    at = replace(at, header=True)
+                    headers.append(frame[1] + frame[3])
+            if role == "AXHeading":
+                at = replace(at, heading=True)
         label = _label(el, role)
         err, actions = AS.AXUIElementCopyActionNames(el, None)
         actions = tuple(actions or ())
         # Cells without a press action are text holders: pressing them silently does nothing.
-        if label and ("AXPress" in actions or role in SELECTABLE_ROLES):
-            elements.append(Element(label=label, role=role, path=path, ref=el, actions=actions))
+        # On a page, an element that shows less than a few pixels isn't something the user sees
+        # (off screen, Chrome reports everything as a sliver, so size says nothing there).
+        drawn = not at.in_page or at.offscreen or (frame is not None and shows(frame, at.view))
+        if label and drawn and ("AXPress" in actions or role in SELECTABLE_ROLES or role in TEXT_BOX_ROLES):
+            if at.header:
+                in_header.add(len(elements))
+            link = role == "AXLink"
+            elements.append(
+                Element(
+                    label=label,
+                    role=role,
+                    path=path,
+                    ref=el,
+                    actions=actions,
+                    url=_url(el) if link else "",
+                    top=frame[1] if frame else 0.0,
+                    left=frame[0] if frame else 0.0,
+                    bottom=frame[1] + frame[3] if frame else 0.0,
+                    in_page=at.in_page,
+                    in_page_nav=at.nav,
+                    in_main=at.main,
+                    # a link inside a heading, or wrapping one (Google's <a><h3>...</h3></a>)
+                    heading=at.heading or (link and at.in_page and _has_heading(el)),
+                    offscreen=at.offscreen,
+                )
+            )
         keep = (
             label and role not in ("AXStaticText", "AXImage", "AXWebArea") and label.lower() not in noise and depth > 1
         )
         child_path = path + (label[:40],) if keep else path
         for kid in _get(el, "AXChildren") or []:
-            walk(kid, child_path, depth + 1)
+            walk(kid, child_path, depth + 1, at)
 
     window_title = _clean(_get(win, "AXTitle")) if win is not None else ""
     # Wrapper labels that every element shares (the window, the app, a web view named after the
     # page) say nothing about where an element is; keep them out of paths.
     noise.update({window_title.lower(), app_name.lower()})
+    page_url = ""
     if win is not None:
-        walk(win, (), 0)
+        walk(win, (), 0, _Where(view=_frame(win) if browser else None))
+        elements = hide_covered(elements, max(headers, default=0.0), in_header)
+        if browser:
+            pages = web_areas(win)
+            if pages:
+                page_url = _url(main_page(pages))
     if include_menus:
         bar = _get(app, "AXMenuBar")
         for top in (_get(bar, "AXChildren") or [])[1:]:  # skip the Apple menu
@@ -310,7 +545,7 @@ def snapshot(app_name: str, include_menus: bool = True, max_nodes: int = MAX_NOD
                         elements.append(
                             Element(label=title, role="AXMenuItem", path=("menu", top_title), ref=item, in_menu=True)
                         )
-    return Snapshot(app_name, window_title, elements, (time.perf_counter() - t0) * 1e3)
+    return Snapshot(app_name, window_title, elements, (time.perf_counter() - t0) * 1e3, page_url)
 
 
 def fingerprint(app_name: str) -> frozenset[str]:
@@ -358,15 +593,63 @@ def _as_string(text: str) -> str:
 
 def _click_center(ref: Any) -> bool:
     """A real mouse click at the element's centre (the element must be on screen, app in front)."""
-    pos, size = _get(ref, "AXPosition"), _get(ref, "AXSize")
-    if pos is None or size is None:
+    frame = _frame(ref)
+    if frame is None or frame[2] <= 0 or frame[3] <= 0:
         return False
-    ok_p, point = _ax().AXValueGetValue(pos, _ax().kAXValueCGPointType, None)
-    ok_s, dims = _ax().AXValueGetValue(size, _ax().kAXValueCGSizeType, None)
-    if not (ok_p and ok_s) or dims.width <= 0 or dims.height <= 0:
-        return False
-    x, y = int(point.x + dims.width / 2), int(point.y + dims.height / 2)
+    x, y = int(frame[0] + frame[2] / 2), int(frame[1] + frame[3] / 2)
     return _system_events(f"click at {{{x}, {y}}}")
+
+
+def _focus_box(el: Element, app_name: str, allow_click: bool) -> str | None:
+    """Put the cursor in a text box, and check it is there (typing goes wherever the focus is)."""
+    app = _app_element(app_name)
+    if app is None:
+        return None
+    _ax().AXUIElementSetAttributeValue(el.ref, "AXFocused", True)
+    time.sleep(0.2)
+    if _has_focus(app, el.ref):
+        return "focus"
+    if allow_click and _click_center(el.ref):
+        time.sleep(0.3)
+        if _has_focus(app, el.ref):
+            return "click"
+    return None
+
+
+def focused_text_box(app_name: str) -> str | None:
+    """The name of the text box that has the cursor in ``app_name`` ("" when it has none), or None
+    when nothing typeable has focus: typing then would go to the app itself, where single letters
+    are often shortcuts (Gmail archives, mutes and replies on plain keys)."""
+    app = _app_element(app_name)
+    focused = _get(app, "AXFocusedUIElement") if app is not None else None
+    if focused is None:
+        return None
+    role = _get(focused, "AXRole") or ""
+    err, settable = _ax().AXUIElementIsAttributeSettable(focused, "AXValue", None)
+    editable = role in TEXT_BOX_ROLES or (
+        err == 0
+        and bool(settable)
+        and role not in ("AXSlider", "AXCheckBox", "AXScrollBar", "AXRadioButton", "AXIncrementor")
+    )
+    return _label(focused, "AXTextField") if editable else None
+
+
+LINK_WAIT_S = 3.0  # a page can take this long to start going somewhere after its link is pressed
+
+
+def _press_link(el: Element, app_name: str, start: str) -> str | None:
+    """Press a link to another page and wait for the page's address to change. Never a second try
+    by mouse: a slow page may still be on its way, and a click then lands on whatever has moved
+    under the pointer. None when it didn't go; the caller can go to ``el.url`` itself."""
+    if _ax().AXUIElementPerformAction(el.ref, "AXPress") != 0:
+        return None
+    deadline = time.monotonic() + LINK_WAIT_S
+    while time.monotonic() < deadline:
+        time.sleep(0.2)
+        now = page_url(app_name)
+        if now and now.split("#")[0] != start.split("#")[0]:
+            return "press"
+    return None
 
 
 def press_verified(
@@ -377,6 +660,12 @@ def press_verified(
     AS = _ax()
     if el.in_menu:  # menu commands act reliably and often open another window; no page to compare
         return "menu" if AS.AXUIElementPerformAction(el.ref, "AXPress") == 0 else None
+    if el.role in TEXT_BOX_ROLES:
+        return _focus_box(el, app_name, allow_click)
+    if el.in_page and el.role == "AXLink" and el.url.startswith("http"):
+        start = page_url(app_name)
+        if el.url.split("#")[0] != start.split("#")[0]:
+            return _press_link(el, app_name, start)
 
     def changed() -> bool:
         time.sleep(settle_s)
@@ -472,6 +761,148 @@ def find(snap: Snapshot, args: dict[str, str]) -> Element | None:
     return next((e for e in same if e.where == args.get("where", "")), same[0] if same else None)
 
 
+# ------------------------------------------------------------------------------ results on a page
+ROW_TOLERANCE = 40  # px: links whose tops are this close sit in one row of a grid
+
+
+def _host(url: str) -> str:
+    return (urllib.parse.urlsplit(url).hostname or "").lower()
+
+
+def _known_site(link: Element, page_host: str) -> bool | None:
+    """Is this link one of the results (a video, a search hit, a product) on a site whose result
+    addresses have a known shape? None on other sites: the page's layout decides there."""
+    host, path = _host(link.url), urllib.parse.urlsplit(link.url).path
+    if page_host.endswith("youtube.com"):
+        return host.endswith("youtube.com") and (path in ("/watch", "/playlist") or path.startswith("/shorts/"))
+    if re.search(r"(^|\.)google\.[a-z.]+$", page_host):
+        return "google" not in host and "gstatic" not in host
+    if re.search(r"(^|\.)amazon\.[a-z.]+$", page_host):  # ads go through Amazon's ad server, not /dp/
+        return host == page_host and ("/dp/" in path or "/gp/product/" in path)
+    if page_host.endswith("flipkart.com"):
+        return "/p/" in path
+    if page_host.endswith("wikipedia.org"):  # articles, not Help:/Special: pages or sister projects
+        return host == page_host and path.startswith("/wiki/") and ":" not in path[6:]
+    return None
+
+
+COLUMN_PX = 12  # titles whose left edges are this close form one column
+
+
+def _main_column(titles: list[Element]) -> list[Element]:
+    """On a page with no known shape and no headings, results are the longest run of titles lined
+    up at one left edge (Wikipedia's hits, Hacker News' stories); a box of links beside them
+    (sister projects, a sidebar) lines up elsewhere. On a tie, the leftmost column: content reads
+    left to right."""
+    if len(titles) < 2:
+        return titles
+    columns: dict[int, list[Element]] = {}
+    for t in titles:
+        columns.setdefault(round(t.left / COLUMN_PX), []).append(t)
+    best = max(columns.values(), key=lambda col: (len(col), -col[0].left))
+    return best
+
+
+def page_results(snap: Snapshot) -> list[Element]:
+    """The results the page in front lists, in the order the user sees them: top to bottom, and
+    left to right within a row of a grid (YouTube's home page), then those further down the page
+    (when it was read whole). A video's thumbnail and title are two links to one video; they count
+    once, named, placed and pressed through its title. Results scrolled past don't count.
+
+    Known sites go by the shape of their result addresses. Elsewhere: links in the page's main
+    area (not its menus, header or sidebars); of those, heading links when there are any (how most
+    sites set a result's title); else the main column of links."""
+    page_host = _host(snap.url)
+    here = result_key(snap.url)
+    links = [
+        e
+        for e in snap.elements
+        if e.in_page
+        and not e.in_page_nav
+        and e.offscreen in (0, 1)
+        and e.role == "AXLink"
+        and e.url.startswith("http")
+        and result_key(e.url) != here
+    ]
+    known = [(e, _known_site(e, page_host)) for e in links]
+    generic = any(verdict is None for _, verdict in known)
+    by_heading = False
+    if generic:
+        if any(e.in_main for e in links):
+            links = [e for e in links if e.in_main]
+        headed = [e for e in links if e.heading]
+        by_heading = len({result_key(e.url) for e in headed}) >= 2
+        if by_heading:
+            links = headed
+    else:
+        links = [e for e, verdict in known if verdict]
+    order = {id(e): i for i, e in enumerate(snap.elements)}
+    groups: dict[str, list[Element]] = {}
+    for e in links:
+        groups.setdefault(result_key(e.url), []).append(e)
+    # Each result is placed by its title (on screen when any part of it is): titles line up across
+    # a row, while thumbnails and hover previews sit at other heights.
+    titles = [_title([e for e in g if not e.offscreen] or g) for g in groups.values()]
+    if generic and not by_heading:
+        titles = _main_column(titles)
+    shown = sorted((t for t in titles if not t.offscreen), key=lambda e: (e.top, e.left))
+    rows: list[list[Element]] = []
+    for e in shown:
+        if rows and e.top - rows[-1][0].top < ROW_TOLERANCE:
+            rows[-1].append(e)
+        else:
+            rows.append([e])
+    further = sorted((t for t in titles if t.offscreen), key=lambda e: order[id(e)])  # page order
+    return [e for row in rows for e in sorted(row, key=lambda e: e.left)] + further
+
+
+def result_key(url: str) -> str:
+    """What a result link points at. One video can be linked with different extras (a hover
+    preview adds &pp=..., a mix adds &list=...&start_radio=1), so YouTube compares video ids;
+    elsewhere the address without its #fragment."""
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if host.endswith("youtube.com"):
+        query = urllib.parse.parse_qs(parts.query)
+        playlist = query.get("list", [""])[0]
+        # A playlist's card links its title, its songs and "View full playlist" to the playlist
+        # (list=PL...): one result. A mix (list=RD...) is how YouTube links an ordinary video.
+        if parts.path == "/playlist" or (parts.path == "/watch" and playlist.startswith(("PL", "OL"))):
+            return "youtube:list:" + playlist
+        if parts.path == "/watch" and query.get("v", [""])[0]:
+            return "youtube:" + query["v"][0]
+        if parts.path.startswith("/shorts/"):
+            return "youtube:" + parts.path.split("/")[2]
+    return url.split("#")[0]
+
+
+TEXT_LINE_MAX_PX = 60  # a link taller than this is a picture (thumbnail, hover preview), not a line of text
+
+
+def _title(links: list[Element]) -> Element:
+    """The title among the links of one result: a heading's link (a channel banner's "Mix" button
+    can link to the same video as the card titled "Mix – Arijit Singh"), then the largest line of
+    text (a playlist card's title is set bigger than the songs listed under it; labels are cut at
+    90 characters, so length alone can't tell them apart), then the longer label."""
+
+    def size(e: Element) -> tuple[bool, bool, float, int]:
+        height = 0 if e.offscreen else e.bottom - e.top  # off screen Chrome reports no real size
+        text_line = 0 < height <= TEXT_LINE_MAX_PX
+        return (e.heading, text_line, round(height) if text_line else 0, len(e.label))
+
+    return max(links, key=size)
+
+
+_VIEWS = re.compile(r"\s+by\s+.+?\s+[\d.,]+\s*[KMB]?\s+views?\b.*$", re.IGNORECASE)
+_DURATION = re.compile(r"(?:,?\s+\d+\s+(?:hours?|minutes?|seconds?))+$", re.IGNORECASE)
+
+
+def spoken_label(el: Element) -> str:
+    """A result's name to say aloud: YouTube labels its links "Title by Channel 1.2M views 3 years
+    ago 4 minutes" or "Title 34 minutes"; only the title is worth hearing."""
+    return _DURATION.sub("", _VIEWS.sub("", spoken_name(el.label))).strip() or el.label
+
+
 def dump_tree(app_name: str, max_nodes: int = MAX_NODES) -> list[str]:
     """The front window's raw accessibility tree, indented by depth: role, label, actions. For looking."""
     AS = _ax()
@@ -546,7 +977,7 @@ def screen_text(app_name: str, max_chars: int = 9000, max_nodes: int = MAX_NODES
     pages = web_areas(win)
     if pages:
         # A browser: the page is what "what can you see" is about, not tabs and bookmarks.
-        page = max(pages, key=lambda w: len(_get(w, "AXChildren") or []))
+        page = main_page(pages)
         title = _clean(_get(page, "AXTitle")) or _clean(_get(page, "AXDescription"))
         if title:
             lines.append(f"page: {title}")

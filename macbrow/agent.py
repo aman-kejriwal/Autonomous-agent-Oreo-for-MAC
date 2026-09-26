@@ -123,6 +123,9 @@ class DynamicMacAgent:
         # Last results/search page seen per site, so "play the second one" still means the second
         # search result after the first one was opened: host -> (url, time seen)
         self.listings: dict[str, tuple[str, float]] = {}
+        # Results opened by position -> the list they were picked from, as it was on screen then
+        # (address, spoken name per result) and when: "the second one" counts in that list.
+        self.picked_from: dict[str, tuple[list[tuple[str, str]], float]] = {}
 
     async def start(self) -> None:
         """Warm the context poller (optional; handle() does it lazily)."""
@@ -262,6 +265,10 @@ class DynamicMacAgent:
                 return outcome
 
         if route.kind == "uncertain" and route.tool:
+            # Unsure between tools: a control on screen that clearly does it settles the question
+            # ("send it" with a compose window open is its Send button, whatever tools came close).
+            if await self._press_on_screen(utterance, ctx, outcome, min_confidence=UI_FALLBACK_CONFIDENCE):
+                return outcome
             # The runner-up among the other tools (the staged one can itself be the runner-up
             # when a hesitant new_action was turned into a question about it).
             others = sorted(
@@ -270,7 +277,7 @@ class DynamicMacAgent:
             )
             alt = self.registry.get(others[0][0]) if others and others[0][1] > 0.2 else None
             if alt is not None:
-                outcome.speak = f"Did you want {_say_tool(route.tool)} or {_say_tool(alt)}?"
+                outcome.speak = f"Did you want to {_say_tool(route.tool)} or {_say_tool(alt)}?"
             else:
                 outcome.speak = f"Should I {_say_tool(route.tool)}?"
             self._stage(route.tool, route.args)
@@ -291,12 +298,22 @@ class DynamicMacAgent:
                 if refusal:
                     outcome.speak = refusal
                     return outcome
+                # before asking for missing details of a task Chrome can't run right now
+                if await self._browser_unreachable(utterance, outcome):
+                    return outcome
                 is_followup = bool(recent) and route.browser_followup >= FOLLOWUP_THRESHOLD
                 if (
                     not is_followup
                     and route.web_goal_complete < GOAL_COMPLETE_THRESHOLD
                     and route.web_goal_missing != "nothing"
                 ):
+                    # Said without the details a whole task needs ("write a new mail"): the user is
+                    # starting it step by step. When the page in front has the control for that
+                    # step (Compose), press it rather than interview them for the rest.
+                    if _on_web_page(ctx) and await self._press_on_screen(
+                        utterance, ctx, outcome, min_confidence=UI_FALLBACK_CONFIDENCE
+                    ):
+                        return outcome
                     question = _ask_for(route.web_goal_missing, route.args.get("site"))
                     self.last_browser = {  # a clarification is a "recent task" the answer follows up on
                         "goal": utterance,
@@ -379,6 +396,8 @@ class DynamicMacAgent:
         if refusal:
             outcome.speak = refusal
             return
+        if await self._browser_unreachable(utterance, outcome):
+            return
         site = args.get("site", "other")
         recent = self._recent_browser()
         lb = self.last_browser or {}
@@ -425,6 +444,12 @@ class DynamicMacAgent:
 
         t0 = time.perf_counter()
         result = await browser_task.run_task(start_url, goal, on_progress=self.on_learning, reuse_target=reuse)
+        if result.status == "error" and result.steps == 0:
+            # Couldn't even connect, for whatever reason (the check above can't foresee them all):
+            # the control on screen may still do it before we report the failure.
+            log.info("browser task couldn't start (%s); trying the screen", result.error)
+            if await self._on_screen_instead(utterance, outcome):
+                return
         achieved: float | None = None
         if result.status == "blocked" and success and result.page_text:
             # The agent may have stopped because the results were already the answer.
@@ -475,6 +500,29 @@ class DynamicMacAgent:
             reason = await self._explain_stall(goal, result)
             if reason:
                 outcome.speak = f"{result.spoken} {reason}"
+
+    async def _browser_unreachable(self, utterance: str, outcome: Outcome) -> bool:
+        """The browser agent drives Chrome over remote debugging; when that is off, don't wait ~10 s
+        for a connection that can't come. Most requests on an open page are one control away
+        ("write a new mail" is Gmail's Compose button, on any site's equivalent): do that through
+        the screen. Otherwise open Chrome's setting and say what to click. True when handled."""
+        state = await asyncio.to_thread(browser_task.chrome_connection)
+        if state == "ok":
+            return False
+        log.info("can't connect to Chrome (%s); trying the screen for %r", state, utterance)
+        if await self._on_screen_instead(utterance, outcome):
+            return True
+        if state == "off":
+            await run_applescript(_open_new_tab_script(browser_task.REMOTE_DEBUGGING_PAGE))
+            outcome.speak = browser_task.NO_REMOTE_DEBUGGING
+        else:  # on, but this process may not read Chrome's connection file
+            outcome.speak = browser_task.CANT_READ_PORT_FILE
+        return True
+
+    async def _on_screen_instead(self, utterance: str, outcome: Outcome) -> bool:
+        """When the browser agent can't run, the control on screen that does what was asked."""
+        ctx = await self.context.latest()
+        return await self._press_on_screen(utterance, ctx, outcome, min_confidence=UI_FALLBACK_CONFIDENCE)
 
     async def _verify_outcome(self, objective: str, success: str, result: browser_task.BrowserResult) -> float | None:
         """Independent check that the final page actually shows what the user asked for."""
@@ -703,8 +751,9 @@ class DynamicMacAgent:
     # ------------------------------------------------------------- on-screen controls
     def _start_ui_snapshot(self, ctx) -> asyncio.Task | None:
         app = ctx.active_app
-        if not app or app.lower() in policy.BLOCKED_APPS or app.lower() in BROWSERS:
-            return None  # web pages have their own tools and huge trees; blocked apps stay untouched
+        if not app or app.lower() in policy.BLOCKED_APPS:
+            return None  # blocked apps stay untouched
+        # Browsers too: only the visible part of the page is read, so it stays quick.
         return asyncio.ensure_future(asyncio.to_thread(ui.snapshot, app))
 
     async def _ui_snapshot(self, ctx) -> ui.Snapshot | None:
@@ -730,6 +779,10 @@ class DynamicMacAgent:
         True when the turn is handled (pressed, or a question asked)."""
         snap = await self._ui_snapshot(ctx)
         if snap is None or not snap.elements:
+            if not await asyncio.to_thread(ui.trusted):
+                # Without it every app looks empty: say so instead of "I can't find that".
+                outcome.speak = ui.NOT_TRUSTED
+                return True
             return False
         t0 = time.perf_counter()
         crit, by_key = ui.choice_criteria(ui.candidates(snap, utterance))
@@ -774,13 +827,13 @@ class DynamicMacAgent:
         pressable = ui.press_args(el)
         if el.dangerous:
             self._stage(self.registry.get("ui_press"), pressable, utterance)
-            outcome.speak = f"That would press {el.label} in {snap.app}. Should I?"
+            outcome.speak = f"That would press {ui.spoken_name(el.label)} in {snap.app}. Should I?"
             return True
         if conf < min_confidence:
             if min_confidence > UI_PRESS_CONFIDENCE:
                 return False  # fallback tier: not sure enough to claim it; let codegen try
             self._stage(self.registry.get("ui_press"), pressable, utterance)
-            outcome.speak = f"Did you mean {el.label}" + (f" in {el.where}?" if el.where else "?")
+            outcome.speak = f"Did you mean {ui.spoken_name(el.label)}" + (f" in {el.where}?" if el.where else "?")
             return True
         return await self._press(el, snap, ctx, outcome)
 
@@ -843,6 +896,90 @@ class DynamicMacAgent:
             outcome.speak += f" {already.removeprefix('Play ')} was already on screen too."
         return True
 
+    async def _open_result_on_screen(self, position: str, outcome: Outcome) -> bool:
+        """ "Play the first video": the n-th result as the page in front shows it, read from the
+        browser's accessibility tree (the user's own logged-in, filtered, scrolled page), then
+        pressed like any control. Needs no JavaScript permission and downloads nothing. False when
+        the page doesn't list that many results; the tool's script then runs."""
+        ctx = await self.context.latest()
+        app = ctx.active_app
+        if app.lower() not in BROWSERS:
+            return False
+        # The page's address as it is now, from the browser itself: the context poller's copy can
+        # still be the list, or missing, a moment after a result was opened (YouTube changes its
+        # address after the click).
+        here = await asyncio.to_thread(ui.page_url, app)
+        if not here and ctx.focus is not None and ctx.focus.kind == "tab":
+            here = ctx.focus.id
+        if not here.startswith("http"):
+            return False
+        n = int(position) if position.isdigit() else 1
+        came_from = self.picked_from.get(ui.result_key(here))
+        if came_from and time.time() - came_from[1] <= BROWSER_MEMORY_S:
+            # "the second one" on a page opened from a list: the list as the user saw it then,
+            # not a reload of it (the site may have reordered it since)
+            listed = came_from[0]
+            if len(listed) < n:
+                outcome.speak = f"That list only had {len(listed)} results."
+                return True
+            url, label = listed[n - 1]
+            res = await run_applescript(_open_url_script(app, url))
+            self.picked_from[ui.result_key(url)] = came_from
+            log.info("open result #%d from the remembered list: %r -> %s", n, label, res.ok)
+            await self.context.refresh()
+            outcome.executed = res.ok
+            outcome.speak = f"Opening {label}." if res.ok else f"I couldn't open result {n}."
+            return True
+        snap = await self._ui_snapshot(ctx)  # what is on screen: "the first one" is the first one seen
+        results = ui.page_results(snap) if snap else []
+        if len(results) < n:
+            # Further down the page ("the tenth one" with six on screen), or not drawn yet: read
+            # the whole page, after a moment for one still loading.
+            await asyncio.sleep(0.5)
+            whole = await asyncio.to_thread(ui.snapshot, app, False, ui.MAX_NODES * 2, True)
+            if whole is not None:
+                snap, results = whole, ui.page_results(whole)
+        log.info("results on screen in %s: %d (want #%d) %s", app, len(results), n, snap.url if snap else "")
+        if snap is None or len(results) < n:
+            return False
+        el = results[n - 1]
+        t0 = time.perf_counter()
+        how = await asyncio.to_thread(ui.press_verified, el, snap.app, ui.window_fingerprint(snap), True)
+        if how is None:
+            # The page ignored the press: go to the link's address, still without JavaScript.
+            res = await run_applescript(_open_url_script(app, el.url))
+            how = "address" if res.ok else None
+        outcome.timings["press_ms"] = (time.perf_counter() - t0) * 1e3
+        log.info("open result #%d %r -> %s", n, el.label, how)
+        if how is not None:
+            listed = [(e.url, ui.spoken_label(e)) for e in results]
+            self.picked_from[ui.result_key(el.url)] = (listed, time.time())
+        await self.context.refresh()
+        outcome.executed = how is not None
+        outcome.speak = f"Opening {ui.spoken_label(el)}." if how else f"I couldn't open result {n} on this page."
+        return True
+
+    async def _text_box_ready(self, app: str, outcome: Outcome) -> bool:
+        """Typing goes wherever the focus is. With no text box focused it goes to the app itself,
+        where single letters are often shortcuts (Gmail archives, mutes, replies on plain keys),
+        and "Done." would be a lie: type nothing and say why."""
+        if app.lower() in policy.BLOCKED_APPS:
+            return True  # the policy decides about those
+        if not await asyncio.to_thread(ui.trusted):
+            outcome.speak = ui.NOT_TRUSTED
+            return False
+        box = await asyncio.to_thread(ui.focused_text_box, app)
+        if box is None:  # the cursor may still be on its way (a compose window opening)
+            await asyncio.sleep(0.6)
+            box = await asyncio.to_thread(ui.focused_text_box, app)
+        if box is None:
+            outcome.speak = (
+                f"No text box is selected in {app}, so I didn't type anything. "
+                "Tell me where first, like: go to the subject field."
+            )
+            return False
+        return True
+
     async def _press_confirmed(self, args: dict[str, str], ctx, outcome: Outcome) -> None:
         snap = await self._ui_snapshot(ctx)
         el = ui.find(snap, args) if snap else None
@@ -861,19 +998,28 @@ class DynamicMacAgent:
             ui.window_fingerprint(snap),
             ctx.active_app == snap.app,  # a real click only when the app is in front (not covered)
         )
+        if how is None and el.in_page and el.url.startswith("http") and snap.app.lower() in BROWSERS:
+            # A web link that ignored the press: go where it points instead.
+            res = await run_applescript(_open_url_script(snap.app, el.url))
+            how = "address" if res.ok else None
         outcome.timings["press_ms"] = (time.perf_counter() - t0) * 1e3
         outcome.executed = how is not None
         log.info("ui press %r in %s -> %s", el.label, snap.app, how or "no visible change")
         await self.context.refresh()
+        name = ui.spoken_name(el.label)
         if how is None:
-            outcome.speak = f"Nothing changed after pressing {el.label}. It may already be open."
+            outcome.speak = f"Nothing changed after pressing {name}. It may already be open."
             return True
         if el.in_menu:
-            outcome.speak = f"Done: {el.label}."
-        elif el.label.lower().startswith("play "):
-            outcome.speak = f"Playing {el.label[5:]}."
+            outcome.speak = f"Done: {name}."
+        elif el.role in ui.TEXT_BOX_ROLES:
+            outcome.speak = f"In {name}."
+        elif name.lower().startswith("play "):
+            outcome.speak = f"Playing {name[5:]}."
+        elif el.role in ("AXButton", "AXMenuButton", "AXPopUpButton", "AXCheckBox", "AXDisclosureTriangle"):
+            outcome.speak = f"Pressed {name}."  # a button does something; "opened Send" says the wrong thing
         else:
-            outcome.speak = f"Opened {el.label}."
+            outcome.speak = f"Opened {name}."
         return True
 
     # --------------------------------------------------------------- result lists
@@ -932,6 +1078,8 @@ class DynamicMacAgent:
             return
         if tool.name == "search_here" and await self._search_in_app(args.get("query", ""), outcome):
             return  # used the app's own search box; the keyboard-shortcut script is only the fallback
+        if tool.name == "open_result" and await self._open_result_on_screen(args.get("position", "1"), outcome):
+            return  # read off the page in front; the script (page download, then JavaScript) is the fallback
         if tool.runner == "ui":
             ctx = await self.context.latest()
             if args.get("label"):  # confirmed earlier: press that exact element
@@ -940,6 +1088,8 @@ class DynamicMacAgent:
                 outcome.speak = outcome.speak or f"I can't find that in {ctx.active_app}."
             return
         ctx = await self.context.latest()
+        if tool.name == "type_here" and not await self._text_box_ready(ctx.active_app, outcome):
+            return
         focus = ctx.focus_in(tool.scope or ctx.active_app)
         if tool.computed:
             args = dict(args)
@@ -971,7 +1121,15 @@ class DynamicMacAgent:
             self.last_args[tool.name] = dict(args)
         if not result.ok:
             log.warning("tool %s failed: %s", tool.name, result.error)
-            outcome.speak = f"{prefix}That didn't work: {_short(result.error)}"
+            # Whatever the script couldn't do may still be a control on screen: try that before
+            # giving up (a missing permission, an app whose scripting broke, a changed page).
+            if utterance and await self._press_on_screen(
+                utterance, await self.context.latest(), outcome, min_confidence=UI_FALLBACK_CONFIDENCE
+            ):
+                return
+            outcome.speak = (
+                f"{prefix}That didn't work. {_explain_script_error(result.error, tool.scope or ctx.active_app)}"
+            )
             return
         out = result.output
         if tool.name in BROWSER_OPENERS:
@@ -1052,6 +1210,25 @@ def _on_web_page(ctx) -> bool:
     )
 
 
+def _open_url_script(app: str, url: str) -> str:
+    """Point the front tab of a browser (Chrome or Safari) at ``url``."""
+    u = url.replace("\\", "\\\\").replace('"', '\\"')
+    if app.lower() == "safari":
+        return f'tell application "Safari" to set URL of current tab of front window to "{u}"'
+    return f'tell application "Google Chrome" to set URL of active tab of front window to "{u}"'
+
+
+def _open_new_tab_script(url: str) -> str:
+    u = url.replace("\\", "\\\\").replace('"', '\\"')
+    return (
+        'tell application "Google Chrome"\n'
+        "  if (count of windows) is 0 then make new window\n"
+        f'  tell front window to make new tab with properties {{URL:"{u}"}}\n'
+        "  activate\n"
+        "end tell"
+    )
+
+
 def _has_place(ctx) -> bool:
     """Is the user in something worth staying in? Not when only the bare desktop is in front."""
     return not (ctx.active_app == "Finder" and ctx.focus is None)
@@ -1088,10 +1265,13 @@ def _ask_for(missing: str, site: str | None) -> str:
 def _say_tool(tool: Tool | None, args: dict[str, str] | None = None) -> str:
     if tool is None:
         return "that"
-    # First clause only: "open a well-known site (YouTube, Gmail...), a URL, or a web search..." is
-    # unreadable when two of them are read out in one question.
-    text = re.split(r"\s*[:(;]|, or |, and ", tool.description, maxsplit=1)[0].rstrip(". ")
-    text = text[0].lower() + text[1:]
+    if tool.say:  # a short spoken name, for tools whose description can't be cut down to one
+        text = tool.say
+    else:
+        # First clause only: "open a well-known site (YouTube, Gmail...), a URL, or a web search..."
+        # is unreadable when two of them are read out in one question.
+        text = re.split(r"\s*[:(;]|, or |, and ", tool.description, maxsplit=1)[0].rstrip(". ")
+        text = text[0].lower() + text[1:]
     if args:
         text += " with " + ", ".join(f"{k} {v}" for k, v in args.items())
     return text
@@ -1106,6 +1286,34 @@ def _say_violation(v: policy.Violation) -> str:
         "system preference writes": "change system preferences",
     }
     return spoken.get(v.rule, v.rule)
+
+
+# macOS's AppleScript errors, said as what is wrong and what fixes it.
+_SCRIPT_ERRORS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"-1743|not authori[sz]ed to send apple events", re.I),
+        "macOS hasn't allowed me to control {app}. Allow it in System Settings, Privacy and Security, Automation.",
+    ),
+    (
+        re.compile(r"-1719|-25211|assistive access|not allowed to send keystrokes", re.I),
+        "I need the Accessibility permission. Turn it on in System Settings, Privacy and Security, Accessibility.",
+    ),
+    (re.compile(r"-600\b|isn.t running|application isn.t running", re.I), "{app} isn't running."),
+    (re.compile(r"-1712|timed out|AppleEvent timed out", re.I), "{app} didn't answer in time; it may be busy."),
+    (
+        re.compile(r"allow javascript from apple events", re.I),
+        "Chrome won't let me read this page. Turn on View, Developer, Allow JavaScript from Apple Events.",
+    ),
+]
+
+
+def _explain_script_error(error: str, app: str) -> str:
+    for pattern, text in _SCRIPT_ERRORS:
+        if pattern.search(error or ""):
+            return text.format(app=app or "that app")
+    # osascript's own wording, without its "execution error:" prefix and "(-1728)" code
+    cleaned = re.sub(r"^.*?execution error:\s*|\s*\(-?\d+\)\s*$", "", (error or "").strip())
+    return _short(cleaned or "it failed for an unknown reason.")
 
 
 def _short(s: str, n: int = 140) -> str:
