@@ -1,17 +1,17 @@
-# macbrow
+# Oreo
 
 Talk to your Mac. Say a command and it runs as AppleScript; say a web task and it drives
 your Chrome. Routing takes about 300 ms because a System One model *chooses* instead of
 generating.
 
-[![macbrow demo](https://img.youtube.com/vi/cPBlb1neXiI/maxresdefault.jpg)](https://youtu.be/cPBlb1neXiI)
+[![Oreo demo](https://img.youtube.com/vi/cPBlb1neXiI/maxresdefault.jpg)](https://youtu.be/cPBlb1neXiI)
 
 *Demo video: [youtu.be/cPBlb1neXiI](https://youtu.be/cPBlb1neXiI)*
 
 > **Experimental. Not for production.** This prototype lets a language model run scripts
 > and click around a browser on your machine. An early version, asked to "clean up my
 > desktop", moved every file on the Desktop into a folder. The safety policy in
-> [`macbrow/policy.py`](macbrow/policy.py) exists because of that. Keep it on, read it
+> [`oreo/policy.py`](oreo/policy.py) exists because of that. Keep it on, read it
 > first, and don't point voice control at a machine whose setup you can't afford to lose.
 
 ```
@@ -34,7 +34,7 @@ A typical computer-use agent runs a loop of *screenshot → LLM reasons → emit
 Each turn is a generation call: seconds of latency, free-form output that has to be parsed,
 and a model that can hallucinate a button that isn't there.
 
-macbrow inverts this. Code owns the workflow and hands Jev small, typed questions:
+Oreo inverts this. Code owns the workflow and hands Jev small, typed questions:
 
 - **Routing is one Choice.** The options are the tools that apply to the apps open *right
   now*, plus "chat" and "new action". Jev returns a probability for every option, not
@@ -55,7 +55,7 @@ macbrow inverts this. Code owns the workflow and hands Jev small, typed question
 
 - **It knows what you're working on.** Every second the context poller reads what is open in
   the front app (the selected note, the Chrome/Safari tab, the Finder folder, the TextEdit
-  document, the Mail message; see [`macbrow/focus.py`](macbrow/focus.py)) and remembers what
+  document, the Mail message; see [`oreo/focus.py`](oreo/focus.py)) and remembers what
   was open in apps you just left. Jev gets both, and tools of the app in front come first, so
   "create a note called My_Note", then "write buy milk", then (from Chrome) "add call mom to my
   note" all land in My_Note without naming it. Tools reach the open object through the built-in
@@ -72,10 +72,10 @@ macbrow inverts this. Code owns the workflow and hands Jev small, typed question
   current tab). If none clearly fits, a background-only action still runs (you stay put), and
   leaving is asked first: "That would take you out of this page. Should I...?"
 
-- **It can use any app's own buttons.** "Open liked songs" with Spotify in front: macbrow reads
+- **It can use any app's own buttons.** "Open liked songs" with Spotify in front: Oreo reads
   the app's on-screen controls through macOS accessibility, each with the sections it sits in
   ("Your Library > Liked Songs") plus the app's menu commands, and Jev *chooses* one in a single
-  request ([`macbrow/ui.py`](macbrow/ui.py)). The window is read while Jev routes, so it costs
+  request ([`oreo/ui.py`](oreo/ui.py)). The window is read while Jev routes, so it costs
   no extra round-trip. The press is verified: if the window didn't change it tries the button
   inside the row, then a real click, and otherwise says nothing happened instead of "done".
   Buttons like Delete, Send, Log Out or Buy always need a spoken yes. "Search for X" uses the
@@ -91,7 +91,7 @@ steps and 3.7 s; "play the Love Hypothesis trailer" from end of speech to video 
 
 ## Voice: Gradium
 
-Every word macbrow hears and says goes through [Gradium](https://gradium.ai). Gradium's
+Every word Oreo hears and says goes through [Gradium](https://gradium.ai). Gradium's
 streaming STT turns the mic into text with end-of-turn detection, and its TTS speaks the
 replies; the greeting, confirmations, clarifying questions and results all come from the
 same voice. Both run through the official `livekit-plugins-gradium` package, so swapping
@@ -111,9 +111,9 @@ cp .env.example .env.local   # GRADIUM_API_KEY (gradium.ai), TYPESAFE_API_KEY, L
   Privacy & Security ▸ Automation.
 - For browser tasks, once: open `chrome://inspect/#remote-debugging` and tick **Allow remote
   debugging for this browser instance**. Click Allow on Chrome's sheet at first connection.
-- `MACBROW_CHROME_PROFILE_EMAIL` pins Chrome to one Google account; unset, the last-used
+- `OREO_CHROME_PROFILE_EMAIL` pins Chrome to one Google account; unset, the last-used
   profile is kept.
-- `MACBROW_LLM_PROVIDER=lmstudio` uses a local model on port 1234 instead of LiveKit
+- `OREO_LLM_PROVIDER=lmstudio` uses a local model on port 1234 instead of LiveKit
   Inference.
 
 ## Run
@@ -121,8 +121,8 @@ cp .env.example .env.local   # GRADIUM_API_KEY (gradium.ai), TYPESAFE_API_KEY, L
 ```bash
 ./console.sh start                                # voice, local mic and speaker; ./console.sh log to read back
 uv run python agent.py console                    # same, foreground
-uv run python -m macbrow.cli --dry "open github dot com"   # route only, no audio
-uv run python -m macbrow.cli --policy             # every tool and whether policy allows it
+uv run python -m oreo.cli --dry "open github dot com"   # route only, no audio
+uv run python -m oreo.cli --policy             # every tool and whether policy allows it
 ```
 
 ## What it can and can't do
@@ -140,7 +140,7 @@ payments, sign-in and account changes.
 The policy runs when a tool is loaded, when a new tool is generated, and on the rendered
 script right before execution. Anything that changes state (a risky script, an add-to-cart,
 a freshly written tool) is read back and needs a spoken yes. It does not protect against a
-mis-heard word that happens to be a valid command; `MACBROW_POLICY=off` exists for debugging
+mis-heard word that happens to be a valid command; `OREO_POLICY=off` exists for debugging
 and the greeting says so out loud.
 
 ## Layout
@@ -148,15 +148,15 @@ and the greeting says so out loud.
 | Path | Role |
 |---|---|
 | [`agent.py`](agent.py) | LiveKit entrypoint: Gradium STT/TTS, router before LLM |
-| [`macbrow/router.py`](macbrow/router.py) | Jev routing, speculative arguments, follow-up and completeness judgments |
-| [`macbrow/agent.py`](macbrow/agent.py) | State machine: act, ask, confirm, learn |
-| [`macbrow/registry.py`](macbrow/registry.py) + [`tools/seed.json`](tools/seed.json) | Tools with typed argument slots; learned ones go to `tools/learned.json` |
-| [`macbrow/generator.py`](macbrow/generator.py) | LLM writes a new tool: compile, effect, policy and Jev-review gates, 3 repair rounds |
-| [`macbrow/browser_task.py`](macbrow/browser_task.py) | jev-ultrafast in the user's Chrome: pinned profile, follow-ups, clarifying questions, spoken results |
-| [`macbrow/policy.py`](macbrow/policy.py) | The safety policy |
-| [`macbrow/ui.py`](macbrow/ui.py) | The front app's on-screen controls (accessibility), Jev picks one, verified press |
-| [`macbrow/focus.py`](macbrow/focus.py) | What is open in the front app (note, tab, folder...) and apps' AppleScript dictionaries |
-| [`macbrow/chrome.py`](macbrow/chrome.py), [`resolvers.py`](macbrow/resolvers.py), [`applescript.py`](macbrow/applescript.py), [`cli.py`](macbrow/cli.py) | Profile lookup, computed args, osascript, text REPL |
+| [`oreo/router.py`](oreo/router.py) | Jev routing, speculative arguments, follow-up and completeness judgments |
+| [`oreo/agent.py`](oreo/agent.py) | State machine: act, ask, confirm, learn |
+| [`oreo/registry.py`](oreo/registry.py) + [`tools/seed.json`](tools/seed.json) | Tools with typed argument slots; learned ones go to `tools/learned.json` |
+| [`oreo/generator.py`](oreo/generator.py) | LLM writes a new tool: compile, effect, policy and Jev-review gates, 3 repair rounds |
+| [`oreo/browser_task.py`](oreo/browser_task.py) | jev-ultrafast in the user's Chrome: pinned profile, follow-ups, clarifying questions, spoken results |
+| [`oreo/policy.py`](oreo/policy.py) | The safety policy |
+| [`oreo/ui.py`](oreo/ui.py) | The front app's on-screen controls (accessibility), Jev picks one, verified press |
+| [`oreo/focus.py`](oreo/focus.py) | What is open in the front app (note, tab, folder...) and apps' AppleScript dictionaries |
+| [`oreo/chrome.py`](oreo/chrome.py), [`resolvers.py`](oreo/resolvers.py), [`applescript.py`](oreo/applescript.py), [`cli.py`](oreo/cli.py) | Profile lookup, computed args, osascript, text REPL |
 
 Add a tool by appending to `tools/seed.json`: a name, description, optional app `scope`,
 `args` (enum with `criteria`, or `text`), an AppleScript with `{{placeholders}}`, and what to

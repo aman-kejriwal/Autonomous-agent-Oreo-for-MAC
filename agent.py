@@ -1,12 +1,12 @@
-"""LiveKit Agents entrypoint for macbrow.
+"""LiveKit Agents entrypoint for oreo.
 
     uv run python agent.py console      # local mic/speaker, no LiveKit server needed
     uv run python agent.py dev          # connect to LIVEKIT_URL as a worker
     uv run python agent.py download-files
 
 Pipeline: STT -> (Jev router -> AppleScript) | LLM for brief replies -> TTS.
-Speech defaults to free on-device Parakeet/Kokoro via mlx-audio; MACBROW_SPEECH=gradium uses Gradium.
-LLM defaults to LiveKit Inference (openai/gpt-5-mini); MACBROW_LLM_PROVIDER=lmstudio uses a local model.
+Speech defaults to free on-device Parakeet/Kokoro via mlx-audio; OREO_SPEECH=gradium uses Gradium.
+LLM defaults to LiveKit Inference (openai/gpt-5-mini); OREO_LLM_PROVIDER=lmstudio uses a local model.
 """
 
 from __future__ import annotations
@@ -15,21 +15,23 @@ import asyncio
 import contextlib
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from dotenv import load_dotenv
-from livekit import agents
+from livekit import agents, rtc
 from livekit.agents import Agent, AgentServer, AgentSession, StopResponse, get_job_context, inference, llm
+from livekit.agents.voice.io import AudioInput
 from livekit.plugins import gradium, silero
 from livekit.plugins import openai as lk_openai
 
-from macbrow import policy
-from macbrow.agent import DynamicMacAgent
+from oreo import policy
+from oreo.agent import DynamicMacAgent
 
 load_dotenv(".env.local")
 load_dotenv()
 
-log = logging.getLogger("macbrow.voice")
+log = logging.getLogger("oreo.voice")
 
 
 # ---------------------------------------------------------------------------
@@ -38,14 +40,42 @@ log = logging.getLogger("macbrow.voice")
 
 # The pop-up stays up for the whole conversation and hides only after this many seconds in which
 # nobody spoke and nothing was running (or when the user explicitly ends the session).
-HUD_IDLE_S = float(os.environ.get("MACBROW_HUD_IDLE_S", "5"))
+HUD_IDLE_S = float(os.environ.get("OREO_HUD_IDLE_S", "5"))
 # After the user stops talking, speech-to-text can take seconds to deliver the words (local
 # Parakeet: up to ~9 s). That wait is not silence; it gets this much grace before the countdown.
-TRANSCRIPT_GRACE_S = float(os.environ.get("MACBROW_TRANSCRIPT_GRACE_S", "10"))
+TRANSCRIPT_GRACE_S = float(os.environ.get("OREO_TRANSCRIPT_GRACE_S", "10"))
+# The mic is only heard after this global shortcut (the HUD registers it); the conversation stays
+# open until the pop-up hides, then the mic goes deaf again. "off" listens all the time.
+HOTKEY = os.environ.get("OREO_HOTKEY", "option+space").strip()
+HOTKEY_ENABLED = HOTKEY.lower() not in ("", "off")
+# After the shortcut, this long to start talking before it goes back to sleep.
+WAKE_S = float(os.environ.get("OREO_WAKE_S", "8"))
+
+
+def pretty_hotkey(spec: str) -> str:
+    """'option+space' -> '⌥Space'."""
+    symbols = {"cmd": "⌘", "command": "⌘", "opt": "⌥", "option": "⌥", "alt": "⌥", "ctrl": "⌃", "control": "⌃"}
+    symbols["shift"] = "⇧"
+    return "".join(symbols.get(p.strip().lower(), p.strip().capitalize()) for p in spec.split("+"))
+
+
+class MicGate(AudioInput):
+    """The mic while open; silence of the same shape while closed, so VAD and STT keep running but
+    hear nothing until the shortcut wakes the assistant."""
+
+    def __init__(self, source: AudioInput) -> None:
+        super().__init__(label="oreo-mic-gate", source=source)
+        self.open = False
+
+    async def __anext__(self) -> rtc.AudioFrame:
+        frame = await super().__anext__()
+        if self.open:
+            return frame
+        return rtc.AudioFrame.create(frame.sample_rate, frame.num_channels, frame.samples_per_channel)
 
 
 class HUDOverlay:
-    """Manages the macbrow_ui companion process.
+    """Manages the oreo_ui companion process.
 
     Presence: visible while the user speaks, while a turn is being handled, and while the agent
     thinks or speaks; ``HUD_IDLE_S`` seconds after all of that stops it hides. Speaking again
@@ -58,12 +88,18 @@ class HUDOverlay:
         self._visible = False
         self._user_speaking = False
         self._agent_active = False  # thinking or speaking
+        self._agent_state = "listening"  # LiveKit agent state, drives the HUD's colours
+        self._mode = ""  # last STATE sent to the HUD
         self._busy = 0  # turns being handled (routing, AppleScript, browser tasks)
         self._transcript_due = 0.0  # loop time until which the user's last words may still arrive
+        self.hotkey_failed = False  # the HUD couldn't register the activation shortcut
+        self.on_hotkey: Callable[[], None] | None = None
+        self.on_hotkey_failed: Callable[[], None] | None = None
+        self.on_hidden: Callable[[], None] | None = None
 
     async def start(self) -> None:
-        bin_path = Path(__file__).resolve().parent / "macbrow_ui"
-        script = Path(__file__).resolve().parent / "macbrow_ui.swift"
+        bin_path = Path(__file__).resolve().parent / "oreo_ui"
+        script = Path(__file__).resolve().parent / "oreo_ui.swift"
 
         if bin_path.exists() and os.access(bin_path, os.X_OK):
             cmd = [str(bin_path)]
@@ -77,7 +113,7 @@ class HUDOverlay:
             self._proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             log.info("HUD overlay started via %s (pid %s)", cmd[0], self._proc.pid)
@@ -88,7 +124,21 @@ class HUDOverlay:
                     if err:
                         log.warning("HUD overlay stderr: %s", err.decode(errors="replace").strip())
 
+            async def _read_events() -> None:
+                while self._proc and self._proc.stdout:
+                    line = await self._proc.stdout.readline()
+                    if not line:
+                        return
+                    event = line.decode(errors="replace").strip()
+                    if event == "HOTKEY" and self.on_hotkey:
+                        self.on_hotkey()
+                    elif event == "HOTKEY_FAILED":
+                        self.hotkey_failed = True
+                        if self.on_hotkey_failed:
+                            self.on_hotkey_failed()
+
             asyncio.create_task(_monitor_err())
+            asyncio.create_task(_read_events())
         except Exception as e:
             log.warning("Failed to start HUD overlay: %s", e)
             self._proc = None
@@ -120,10 +170,22 @@ class HUDOverlay:
             await asyncio.sleep(delay)
             self._send("HIDE")
             self._visible = False
+            if self.on_hidden:
+                self.on_hidden()
 
         if self._hide_task and not self._hide_task.done():
             self._hide_task.cancel()
         self._hide_task = asyncio.ensure_future(_delayed_hide())
+
+    def wake(self) -> None:
+        """The shortcut was pressed: pop up and give the user ``WAKE_S`` to start talking."""
+        self.show()
+        if not (self._user_speaking or self._agent_active or self._busy):
+            self.hide(delay=max(WAKE_S, HUD_IDLE_S))
+
+    def sleep(self) -> None:
+        """The shortcut was pressed again: close now."""
+        self.hide(delay=0)
 
     # -- presence ------------------------------------------------------------------------
     def user_speaking(self, speaking: bool) -> None:
@@ -141,6 +203,10 @@ class HUDOverlay:
         self._agent_active = active
         self._update()
 
+    def agent_state(self, state: str) -> None:
+        self._agent_state = state
+        self.agent_active(state in ("thinking", "speaking"))
+
     @contextlib.contextmanager
     def busy(self):
         self._busy += 1
@@ -153,6 +219,16 @@ class HUDOverlay:
             self._update()
 
     def _update(self) -> None:
+        if self._agent_state == "speaking":
+            mode = "speaking"
+        elif self._agent_state == "thinking" or self._busy:
+            mode = "thinking"
+        else:
+            mode = "hearing" if self._user_speaking else "listening"
+        if mode != self._mode:
+            self._mode = mode
+            self._send(f"STATE:{mode}")
+
         if self._user_speaking or self._agent_active or self._busy:
             self.show()
             return
@@ -182,28 +258,28 @@ class HUDOverlay:
         self._proc = None
 
 
-INSTRUCTIONS = """You are macbrow, a terse voice assistant that controls this Mac.
+INSTRUCTIONS = """You are Oreo, a terse voice assistant that controls this Mac.
 Mac actions are handled by a fast tool router before you see the message, so anything
 that reaches you is small talk or a quick question. Answer in one short spoken sentence.
 No markdown, no lists, no emoji, no follow-up questions."""
 
-LLM_PROVIDER = os.environ.get("MACBROW_LLM_PROVIDER", "livekit")  # "livekit" | "lmstudio"
+LLM_PROVIDER = os.environ.get("OREO_LLM_PROVIDER", "livekit")  # "livekit" | "lmstudio"
 LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
 
 # "local": free, on-device Parakeet STT + Kokoro TTS served by mlx-audio (./console.sh starts it).
 # "gradium": Gradium streaming STT/TTS (needs GRADIUM_API_KEY and credits).
-SPEECH_PROVIDER = os.environ.get("MACBROW_SPEECH", "local")
-LOCAL_SPEECH_URL = os.environ.get("MACBROW_SPEECH_URL", "http://127.0.0.1:8123/v1")
-LOCAL_STT_MODEL = os.environ.get("MACBROW_STT_MODEL", "mlx-community/parakeet-tdt-0.6b-v2")
-LOCAL_TTS_MODEL = os.environ.get("MACBROW_TTS_MODEL", "mlx-community/Kokoro-82M-bf16")
-LOCAL_VOICE = os.environ.get("MACBROW_VOICE", "af_heart")
+SPEECH_PROVIDER = os.environ.get("OREO_SPEECH", "local")
+LOCAL_SPEECH_URL = os.environ.get("OREO_SPEECH_URL", "http://127.0.0.1:8123/v1")
+LOCAL_STT_MODEL = os.environ.get("OREO_STT_MODEL", "mlx-community/parakeet-tdt-0.6b-v2")
+LOCAL_TTS_MODEL = os.environ.get("OREO_TTS_MODEL", "mlx-community/Kokoro-82M-bf16")
+LOCAL_VOICE = os.environ.get("OREO_VOICE", "af_heart")
 
 
 def build_speech() -> tuple[agents.stt.STT, agents.tts.TTS]:
     if SPEECH_PROVIDER == "gradium":
         return (
             gradium.STT(
-                model_name=os.environ.get("GRADIUM_STT_MODEL", "default"), language=os.environ.get("MACBROW_LANG", "en")
+                model_name=os.environ.get("GRADIUM_STT_MODEL", "default"), language=os.environ.get("OREO_LANG", "en")
             ),
             gradium.TTS(
                 model_name=os.environ.get("GRADIUM_TTS_MODEL", "default"),
@@ -214,7 +290,7 @@ def build_speech() -> tuple[agents.stt.STT, agents.tts.TTS]:
     return (
         lk_openai.STT(
             model=LOCAL_STT_MODEL,
-            language=os.environ.get("MACBROW_LANG", "en"),
+            language=os.environ.get("OREO_LANG", "en"),
             base_url=LOCAL_SPEECH_URL,
             api_key="local",
             use_realtime=False,
@@ -228,24 +304,24 @@ def build_speech() -> tuple[agents.stt.STT, agents.tts.TTS]:
 def build_chat_llm() -> llm.LLM:
     if LLM_PROVIDER == "livekit":
         return inference.LLM(
-            model=os.environ.get("MACBROW_CHAT_MODEL", "openai/gpt-5-mini"),
+            model=os.environ.get("OREO_CHAT_MODEL", "openai/gpt-5-mini"),
             extra_kwargs={
-                "reasoning_effort": os.environ.get("MACBROW_CHAT_REASONING", "minimal"),
+                "reasoning_effort": os.environ.get("OREO_CHAT_REASONING", "minimal"),
                 "max_completion_tokens": 80,
             },
         )
     return lk_openai.LLM(
-        model=os.environ.get("MACBROW_CHAT_MODEL", "qwen/qwen3.5-9b"),
+        model=os.environ.get("OREO_CHAT_MODEL", "qwen/qwen3.5-9b"),
         base_url=LMSTUDIO_BASE_URL,
         api_key=os.environ.get("LMSTUDIO_API_KEY", "lm-studio"),
         temperature=0.3,
         max_completion_tokens=60,
         # Qwen 3.5 thinks by default; LM Studio turns it off with reasoning_effort "none".
-        extra_body={"reasoning_effort": os.environ.get("MACBROW_REASONING_EFFORT", "none")},
+        extra_body={"reasoning_effort": os.environ.get("OREO_REASONING_EFFORT", "none")},
     )
 
 
-class MacBrowAgent(Agent):
+class OreoAgent(Agent):
     def __init__(self, mac: DynamicMacAgent, hud: HUDOverlay) -> None:
         super().__init__(instructions=INSTRUCTIONS)
         self.mac = mac
@@ -281,11 +357,16 @@ class MacBrowAgent(Agent):
             self.hud.done()
             self.hud.set_response(outcome.speak or "Goodbye.")
             self.hud.hide(delay=2.0)
+            if HOTKEY_ENABLED and not self.hud.hotkey_failed:
+                # Push-to-talk: "stop" ends this conversation, not the assistant; the shortcut wakes it.
+                self.mac.memory.clear()
+                self.session.say(outcome.speak or "Goodbye.", add_to_chat_ctx=False)
+                raise StopResponse()
             try:
                 await self.session.say(outcome.speak or "Goodbye.", add_to_chat_ctx=False)
             except RuntimeError:
                 pass
-            get_job_context().shutdown(reason="user asked macbrow to stop")
+            get_job_context().shutdown(reason="user asked oreo to stop")
             raise StopResponse()
 
         self.hud.done()
@@ -302,7 +383,7 @@ class MacBrowAgent(Agent):
 server = AgentServer()
 
 
-@server.rtc_session(agent_name=os.environ.get("MACBROW_AGENT_NAME", "macbrow"))
+@server.rtc_session(agent_name=os.environ.get("OREO_AGENT_NAME", "oreo"))
 async def entrypoint(ctx: agents.JobContext) -> None:
     session: AgentSession | None = None
 
@@ -319,7 +400,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     await hud.start()
 
     mac = DynamicMacAgent(
-        enable_learning=os.environ.get("MACBROW_LEARN", "1") != "0",
+        enable_learning=os.environ.get("OREO_LEARN", "1") != "0",
         on_learning=_filler,
     )
     await mac.start()
@@ -361,7 +442,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     @session.on("agent_state_changed")
     def _on_agent_state(ev):
-        hud.agent_active(ev.new_state in ("thinking", "speaking"))
+        hud.agent_state(ev.new_state)
 
     async def _close() -> None:
         await hud.close()
@@ -377,14 +458,44 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         (os.environ.get("GRADIUM_VOICE_ID") or "gradium default") if SPEECH_PROVIDER == "gradium" else LOCAL_VOICE,
         LLM_PROVIDER,
     )
-    await session.start(agent=MacBrowAgent(mac, hud), room=ctx.room)
-    greeting = "macbrow ready." if policy.ENABLED else "macbrow ready. Warning: the safety policy is off."
+    await session.start(agent=OreoAgent(mac, hud), room=ctx.room)
+
+    # Push-to-talk: the mic is deaf until the shortcut, and again once the pop-up hides.
+    gate: MicGate | None = None
+    if HOTKEY_ENABLED and session.input.audio is not None:
+        gate = MicGate(session.input.audio)
+        session.input.audio = gate
+
+        def _on_hotkey() -> None:
+            if gate.open:
+                log.info("shortcut: sleeping")
+                hud.sleep()
+            else:
+                log.info("shortcut: listening")
+                gate.open = True
+                hud.wake()
+
+        def _on_hotkey_failed() -> None:
+            log.warning("shortcut %s is unavailable; listening all the time instead", HOTKEY)
+            hud.on_hidden = None
+            gate.open = True
+
+        def _on_hidden() -> None:
+            if gate.open:
+                log.info("pop-up closed: mic off until %s", pretty_hotkey(HOTKEY))
+            gate.open = False
+
+        hud.on_hotkey, hud.on_hotkey_failed, hud.on_hidden = _on_hotkey, _on_hotkey_failed, _on_hidden
+        if hud.hotkey_failed:  # reported before we were listening for it
+            _on_hotkey_failed()
+    greeting = "Oreo ready." if policy.ENABLED else "Oreo ready. Warning: the safety policy is off."
     session.say(greeting, add_to_chat_ctx=False)
 
     # Show welcome animation so the user immediately sees the HUD is active on start
     hud.show()
-    hud.set_text("macbrow ready")
-    hud.set_response("Listening for commands…")
+    hud.set_text("Oreo ready")
+    listening_all_the_time = gate is None or gate.open
+    hud.set_response("Listening for commands…" if listening_all_the_time else f"Press {pretty_hotkey(HOTKEY)} to talk")
     hud.agent_active(False)  # start the silence countdown (the greeting's speech state extends it)
 
 

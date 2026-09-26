@@ -311,7 +311,7 @@
         "instructions": "The exact message text the user wants displayed in the notification."
       }
     ],
-    "script": "display notification \"{{message}}\" with title \"macbrow\"\nreturn \"notified\"",
+    "script": "display notification \"{{message}}\" with title \"Oreo\"\nreturn \"notified\"",
     "speak": "done",
     "examples": [
       "remind me on screen to drink water",

@@ -1,8 +1,8 @@
 import json
 
-from macbrow import chrome, registry
-from macbrow.applescript import MacContext
-from macbrow.registry import ArgSpec, PolicyError, Tool, ToolRegistry
+from oreo import chrome, registry
+from oreo.applescript import MacContext
+from oreo.registry import ArgSpec, PolicyError, Tool, ToolRegistry
 
 CTX = MacContext(active_app="Finder", running_apps=["Finder", "Safari"], installed_apps=["Finder", "Safari", "Slack"])
 
@@ -63,7 +63,7 @@ def test_risky_detection_from_script():
 
 
 def test_seed_tools_can_opt_out_of_keystroke_risk():
-    from macbrow.registry import Tool
+    from oreo.registry import Tool
 
     script = 'tell application "System Events" to keystroke "x"'
     assert Tool.from_dict({"name": "a", "description": "d", "script": script}, "seed").risky
@@ -73,8 +73,8 @@ def test_seed_tools_can_opt_out_of_keystroke_risk():
 
 
 def test_superseded_learned_tools_are_kept_but_not_offered():
-    from macbrow.applescript import MacContext
-    from macbrow.registry import Tool
+    from oreo.applescript import MacContext
+    from oreo.registry import Tool
 
     t = Tool.from_dict(
         {"name": "a_tool", "description": "d", "script": "return 1", "superseded_by": "search_here"}, "learned"

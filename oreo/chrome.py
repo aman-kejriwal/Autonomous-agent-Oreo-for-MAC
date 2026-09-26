@@ -6,7 +6,7 @@ the wrong account. Every Chrome-launching script uses
     open -na "Google Chrome" --args --profile-directory=<dir> [--new-window] [URL]
 
 with <dir> filled from the `{{chrome_profile}}` built-in placeholder, resolved here by
-matching MACBROW_CHROME_PROFILE_EMAIL against Chrome's Local State file.
+matching OREO_CHROME_PROFILE_EMAIL against Chrome's Local State file.
 """
 
 from __future__ import annotations
@@ -17,12 +17,12 @@ import os
 import time
 from pathlib import Path
 
-log = logging.getLogger("macbrow.chrome")
+log = logging.getLogger("oreo.chrome")
 
 LOCAL_STATE = Path.home() / "Library/Application Support/Google/Chrome/Local State"
-PROFILE_EMAIL = os.environ.get("MACBROW_CHROME_PROFILE_EMAIL", "")  # empty: use Chrome's last-used profile
-PROFILE_DIR_OVERRIDE = os.environ.get("MACBROW_CHROME_PROFILE_DIR")  # e.g. "Profile 4"
-HOME_URL = os.environ.get("MACBROW_CHROME_HOME", "")  # empty = Chrome's new-tab page
+PROFILE_EMAIL = os.environ.get("OREO_CHROME_PROFILE_EMAIL", "")  # empty: use Chrome's last-used profile
+PROFILE_DIR_OVERRIDE = os.environ.get("OREO_CHROME_PROFILE_DIR")  # e.g. "Profile 4"
+HOME_URL = os.environ.get("OREO_CHROME_HOME", "")  # empty = Chrome's new-tab page
 
 _cache: tuple[float, str] | None = None
 _TTL = 60.0

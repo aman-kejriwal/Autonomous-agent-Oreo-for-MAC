@@ -1,4 +1,4 @@
-"""macbrow: voice-controlled macOS agent.
+"""oreo: voice-controlled macOS agent.
 
 LiveKit Agents (Gradium STT/TTS) -> Jev (TypeSafe System One) routes each
 utterance to an AppleScript tool in ~150ms -> osascript executes it. Unknown

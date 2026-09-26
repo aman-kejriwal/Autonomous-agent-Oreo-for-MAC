@@ -4,7 +4,7 @@ jev-ultrafast (Browser Use × TypeSafe) observes the page as an indexed element 
 lets Jev choose one operation and one target per step; a small LLM writes text only for
 TYPE_TEXT. We add three things on top:
 
-1. Profile pinning: the working tab is created inside the Chrome profile macbrow is
+1. Profile pinning: the working tab is created inside the Chrome profile oreo is
    configured for (see chrome.py), found by opening a probe URL in that profile through
    `open -na` and reading the probe tab's browserContextId over CDP.
 2. Text helper on our own LLM backend (LiveKit Inference or LM Studio) instead of the
@@ -35,9 +35,9 @@ from pydantic import BaseModel, Field
 
 from . import chrome
 
-log = logging.getLogger("macbrow.browser")
+log = logging.getLogger("oreo.browser")
 
-WALL_CLOCK_S = float(os.environ.get("MACBROW_BROWSER_BUDGET_S", "90"))
+WALL_CLOCK_S = float(os.environ.get("OREO_BROWSER_BUDGET_S", "90"))
 CONNECT_TIMEOUT_S = 25.0
 PROGRESS_EVERY_S = 12.0  # spoken progress cadence during a browser task
 VIEWPORT = (1120, 780)  # emulated layout size while a task runs; cleared afterwards
@@ -283,7 +283,7 @@ def _structured_sync(system: str, user: str, cls: type[BaseModel]) -> str:
 
         async def go() -> str:
             m = inference.LLM(
-                model=os.environ.get("MACBROW_CHAT_MODEL", "openai/gpt-5-mini"),
+                model=os.environ.get("OREO_CHAT_MODEL", "openai/gpt-5-mini"),
                 extra_kwargs={"reasoning_effort": "minimal"},
             )
             try:
@@ -303,7 +303,7 @@ def _structured_sync(system: str, user: str, cls: type[BaseModel]) -> str:
         base_url=LMSTUDIO_BASE_URL, api_key=os.environ.get("LMSTUDIO_API_KEY", "lm-studio"), timeout=30
     )
     resp = client.chat.completions.create(
-        model=os.environ.get("MACBROW_CHAT_MODEL", "qwen/qwen3.5-9b"),
+        model=os.environ.get("OREO_CHAT_MODEL", "qwen/qwen3.5-9b"),
         max_tokens=400,
         temperature=0.2,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -325,7 +325,7 @@ def _field_text_sync(context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
         async def go() -> str:
             m = inference.LLM(
-                model=os.environ.get("MACBROW_CHAT_MODEL", "openai/gpt-5-mini"),
+                model=os.environ.get("OREO_CHAT_MODEL", "openai/gpt-5-mini"),
                 extra_kwargs={"reasoning_effort": "minimal"},
             )
             try:
@@ -338,7 +338,7 @@ def _field_text_sync(context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
                 await m.aclose()
 
         raw = _run_coro_blocking(go())
-        model_name = os.environ.get("MACBROW_CHAT_MODEL", "openai/gpt-5-mini")
+        model_name = os.environ.get("OREO_CHAT_MODEL", "openai/gpt-5-mini")
     else:
         import openai
         from livekit.agents.llm import utils as llm_utils
@@ -346,7 +346,7 @@ def _field_text_sync(context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         client = openai.OpenAI(
             base_url=LMSTUDIO_BASE_URL, api_key=os.environ.get("LMSTUDIO_API_KEY", "lm-studio"), timeout=30
         )
-        model_name = os.environ.get("MACBROW_CHAT_MODEL", "qwen/qwen3.5-9b")
+        model_name = os.environ.get("OREO_CHAT_MODEL", "qwen/qwen3.5-9b")
         resp = client.chat.completions.create(
             model=model_name,
             max_tokens=300,
@@ -405,7 +405,7 @@ def _context_id_for_profile(profile_dir: str) -> str | None:
         if any(t.get("browserContextId") == cached for t in infos):
             return cached
     token = uuid.uuid4().hex
-    probe = f"https://example.com/?macbrow_probe={token}"
+    probe = f"https://example.com/?oreo_probe={token}"
     subprocess.run(["open", "-na", "Google Chrome", "--args", f"--profile-directory={profile_dir}", probe], check=False)
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
@@ -429,7 +429,7 @@ def _install_patches() -> None:
     import jev_ultrafast.agent as ja
     from jev_ultrafast.browser import Browser
 
-    if getattr(ja, "_macbrow_patched", False):
+    if getattr(ja, "_oreo_patched", False):
         return
 
     class ProfileBrowser(Browser):
@@ -489,7 +489,7 @@ def _install_patches() -> None:
     ja.Browser = ProfileBrowser
     ja.field_text = _field_text_sync
     _patch_click_executor()
-    ja._macbrow_patched = True
+    ja._oreo_patched = True
 
 
 def _patch_click_executor() -> None:

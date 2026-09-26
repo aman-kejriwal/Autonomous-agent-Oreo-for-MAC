@@ -1,6 +1,6 @@
-from macbrow.applescript import MacContext
-from macbrow.memory import MAX_TURNS, WINDOW_S, SessionMemory
-from macbrow.router import _state
+from oreo.applescript import MacContext
+from oreo.memory import MAX_TURNS, WINDOW_S, SessionMemory
+from oreo.router import _state
 
 
 def _session() -> SessionMemory:

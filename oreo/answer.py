@@ -2,14 +2,14 @@
 page?"), written by the chat LLM from the front window's text and the session so far.
 
 Same backend switch as the rest: LiveKit Inference by default, LM Studio with
-MACBROW_LLM_PROVIDER=lmstudio.
+OREO_LLM_PROVIDER=lmstudio.
 """
 
 from __future__ import annotations
 
 import os
 
-PROVIDER = os.environ.get("MACBROW_LLM_PROVIDER", "livekit")
+PROVIDER = os.environ.get("OREO_LLM_PROVIDER", "livekit")
 LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
 
 SYSTEM = """You are the voice of a Mac assistant. You get the text currently shown in the app in
@@ -29,7 +29,7 @@ async def about_screen(question: str, app: str, screen: str, conversation: str =
         from livekit.agents import inference, llm
 
         model = inference.LLM(
-            model=os.environ.get("MACBROW_CHAT_MODEL", "openai/gpt-5-mini"),
+            model=os.environ.get("OREO_CHAT_MODEL", "openai/gpt-5-mini"),
             extra_kwargs={"reasoning_effort": "minimal", "max_completion_tokens": 160},
         )
         try:
@@ -46,11 +46,11 @@ async def about_screen(question: str, app: str, screen: str, conversation: str =
     client = openai.AsyncOpenAI(base_url=LMSTUDIO_BASE_URL, api_key=os.environ.get("LMSTUDIO_API_KEY", "lm-studio"))
     try:
         resp = await client.chat.completions.create(
-            model=os.environ.get("MACBROW_CHAT_MODEL", "qwen/qwen3.5-9b"),
+            model=os.environ.get("OREO_CHAT_MODEL", "qwen/qwen3.5-9b"),
             max_tokens=160,
             temperature=0.2,
             messages=[{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
-            extra_body={"reasoning_effort": os.environ.get("MACBROW_REASONING_EFFORT", "none")},
+            extra_body={"reasoning_effort": os.environ.get("OREO_REASONING_EFFORT", "none")},
         )
         return (resp.choices[0].message.content or "").strip()
     finally:

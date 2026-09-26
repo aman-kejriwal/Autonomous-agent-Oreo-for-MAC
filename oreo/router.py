@@ -21,7 +21,7 @@ from .applescript import MacContext
 from .memory import SessionMemory
 from .registry import MAX_CHOICE_OPTIONS, Tool, ToolRegistry
 
-log = logging.getLogger("macbrow.router")
+log = logging.getLogger("oreo.router")
 
 CHAT = "chat"
 NEW_ACTION = "new_action"
@@ -142,7 +142,7 @@ class JevRouter:
             "what": "The user wants the voice assistant itself to stop, quit, go to sleep, or stop listening.",
             "examples": [
                 "stop listening",
-                "quit macbrow",
+                "quit oreo",
                 "quit your application wherever you are running",
                 "shut yourself down",
                 "stop running",

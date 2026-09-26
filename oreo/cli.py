@@ -1,8 +1,8 @@
 """Text REPL for exercising the router/executor without audio.
 
-uv run python -m macbrow.cli                 # interactive
-uv run python -m macbrow.cli "mute the mac"  # one-shot
-uv run python -m macbrow.cli --dry "open github dot com"   # route only, don't execute
+uv run python -m oreo.cli                 # interactive
+uv run python -m oreo.cli "mute the mac"  # one-shot
+uv run python -m oreo.cli --dry "open github dot com"   # route only, don't execute
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from .agent import DynamicMacAgent
 
 
 async def _main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="macbrow")
+    ap = argparse.ArgumentParser(prog="oreo")
     ap.add_argument("utterance", nargs="*")
     ap.add_argument("--dry", action="store_true", help="route only; do not execute or learn")
     ap.add_argument("--no-learn", action="store_true", help="disable the LLM tool-generation fallback")
@@ -51,7 +51,7 @@ async def _main(argv: list[str]) -> int:
         from . import policy as _policy
         from .registry import ToolRegistry
 
-        print(f"policy: {'strict' if _policy.ENABLED else 'OFF (MACBROW_POLICY=off)'}")
+        print(f"policy: {'strict' if _policy.ENABLED else 'OFF (OREO_POLICY=off)'}")
         for t in sorted(ToolRegistry().tools.values(), key=lambda t: (not t.blocked, t.source, t.name)):
             print(
                 f"  {'BLOCKED ' if t.blocked else 'allowed '} {t.source:7s} {t.name:28s} {'' if not t.blocked else '; '.join(t.blocked_by)}"
@@ -65,7 +65,7 @@ async def _main(argv: list[str]) -> int:
             return 0
         ctx = await agent.context.latest()
         print(
-            f"macbrow ready. frontmost={ctx.active_app} running={len(ctx.running_apps)} tools={len(agent.registry.tools)}"
+            f"Oreo ready. frontmost={ctx.active_app} running={len(ctx.running_apps)} tools={len(agent.registry.tools)}"
         )
         print("type a command (ctrl-d to quit)\n")
         while True:

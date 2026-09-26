@@ -8,7 +8,7 @@ point at a button that isn't there. Menu commands are included because they are 
 Mac app.
 
 Reading a window takes ~0.3-1 s, so the agent starts the snapshot in parallel with routing.
-Needs the Accessibility permission for the process running macbrow (the same one keystrokes need).
+Needs the Accessibility permission for the process running oreo (the same one keystrokes need).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import urllib.parse
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-log = logging.getLogger("macbrow.ui")
+log = logging.getLogger("oreo.ui")
 
 MAX_NODES = 8000  # walk budget per window
 MAX_DEPTH = 45
@@ -716,6 +716,28 @@ def candidates(snap: Snapshot, utterance: str, limit: int = MAX_OPTIONS) -> list
     order = {id(e): i for i, e in enumerate(unique)}
     unique.sort(key=lambda e: (-len(said & _words(e.label + " " + e.where)), e.in_menu, order[id(e)]))
     return unique[:limit]
+
+
+_COUNT_TAIL = re.compile(r"(\s+(\d[\d,]*|unread|new))+$", re.IGNORECASE)
+_FILLER = {
+    "a", "an", "the", "my", "me", "can", "could", "you", "please", "open", "go", "to", "show", "in",
+    "on", "of", "this", "that", "current", "screen", "page", "tab", "folder", "section",
+}  # fmt: skip
+
+
+def named(elements: list[Element], utterance: str) -> Element | None:
+    """The one element the user named outright: every word of its name (the label without a count
+    or status tail like "3135 unread") is in what they said. None when none or several fit."""
+    said = _words(utterance)
+    hits: dict[str, Element] = {}
+    for el in elements:
+        if el.in_menu:
+            continue
+        name = _COUNT_TAIL.sub("", el.label).strip()
+        words = _words(name)
+        if words and words <= said and words - _FILLER:
+            hits.setdefault(name.lower(), el)
+    return next(iter(hits.values())) if len(hits) == 1 else None
 
 
 def base_key(key: str) -> str:

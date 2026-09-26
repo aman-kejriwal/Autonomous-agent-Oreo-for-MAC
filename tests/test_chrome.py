@@ -1,6 +1,6 @@
 import json
 
-from macbrow import chrome
+from oreo import chrome
 
 LOCAL_STATE = {
     "profile": {

@@ -1,4 +1,4 @@
-from macbrow.ui import Element, Snapshot, candidates, choice_criteria, find, pick_confidence, press_args
+from oreo.ui import Element, Snapshot, candidates, choice_criteria, find, named, pick_confidence, press_args
 
 
 def _snap(*elements: Element) -> Snapshot:
@@ -62,7 +62,7 @@ def test_place_skips_the_wrappers_named_after_the_element():
 
 
 def test_search_field_ranking():
-    from macbrow.ui import Field
+    from oreo.ui import Field
 
     def f(role="AXTextField", subrole="", label="", in_list=False, in_toolbar=False):
         return Field(ref=None, role=role, subrole=subrole, label=label, in_list=in_list, in_toolbar=in_toolbar)
@@ -85,7 +85,7 @@ def _link(label: str, url: str, top: float, left: float, height: float = 20) -> 
 
 
 def test_page_results_follow_the_grid_the_user_sees():
-    from macbrow.ui import page_results
+    from oreo.ui import page_results
 
     home = "https://www.youtube.com/"
     snap = Snapshot(
@@ -109,7 +109,7 @@ def test_page_results_follow_the_grid_the_user_sees():
 
 
 def test_page_results_elsewhere_use_title_length():
-    from macbrow.ui import page_results
+    from oreo.ui import page_results
 
     snap = Snapshot(
         "Safari",
@@ -125,14 +125,14 @@ def test_page_results_elsewhere_use_title_length():
 
 
 def test_spoken_label_keeps_only_the_title():
-    from macbrow.ui import spoken_label
+    from oreo.ui import spoken_label
 
     assert spoken_label(_link("Lofi beats by Lofi Girl 1.2M views 3 years ago", "", 0, 0)) == "Lofi beats"
     assert spoken_label(_link("Stand by Me", "", 0, 0)) == "Stand by Me"
 
 
 def test_scrolled_away_frames_are_outside():
-    from macbrow.ui import outside
+    from oreo.ui import outside
 
     view = (0, 100, 1000, 800)
     assert outside((10, 1200, 200, 100), view)  # below the fold
@@ -143,7 +143,7 @@ def test_scrolled_away_frames_are_outside():
 def test_hover_preview_neither_duplicates_nor_reorders():
     # The pointer rests on the middle card: YouTube adds a preview link, higher up and with other
     # URL extras, to the same video. Found live on the home page.
-    from macbrow.ui import page_results
+    from oreo.ui import page_results
 
     yt = "https://www.youtube.com/watch?v="
     snap = Snapshot(
@@ -166,7 +166,7 @@ def test_hover_preview_neither_duplicates_nor_reorders():
 
 
 def test_spoken_label_drops_a_trailing_duration():
-    from macbrow.ui import spoken_label
+    from oreo.ui import spoken_label
 
     assert spoken_label(_link("I built an AI supercomputer 34 minutes", "", 0, 0)) == "I built an AI supercomputer"
     assert spoken_label(_link("Mix 1 hour, 6 minutes", "", 0, 0)) == "Mix"
@@ -174,7 +174,7 @@ def test_spoken_label_drops_a_trailing_duration():
 
 def test_chrome_squeezes_scrolled_away_elements_into_a_sliver():
     # Found live: Chrome reports an element scrolled above the view as a 1 px line on its edge.
-    from macbrow.ui import outside
+    from oreo.ui import outside
 
     view = (0, 151, 1440, 689)
     assert outside((730, 151, 618, 1), view)  # scrolled away upwards
@@ -184,7 +184,7 @@ def test_chrome_squeezes_scrolled_away_elements_into_a_sliver():
 
 
 def test_pinned_header_hides_what_scrolls_under_it():
-    from macbrow.ui import hide_covered
+    from oreo.ui import hide_covered
 
     header_link = _link("YouTube Home", "https://www.youtube.com/", 158, 90)
     under = _link("Card scrolled under the header", "https://www.youtube.com/watch?v=U", 160, 500)
@@ -195,7 +195,7 @@ def test_pinned_header_hides_what_scrolls_under_it():
 
 
 def test_youtube_playlist_card_is_one_result():
-    from macbrow.ui import page_results
+    from oreo.ui import page_results
 
     yt = "https://www.youtube.com/"
     snap = Snapshot(
@@ -216,7 +216,7 @@ def test_youtube_playlist_card_is_one_result():
 
 def test_sidebar_links_are_never_results():
     # Found live: YouTube's sidebar "Watch Later" / "Liked videos" are playlists too.
-    from macbrow.ui import page_results
+    from oreo.ui import page_results
 
     yt = "https://www.youtube.com/"
     watch_later = _link("Watch Later", yt + "playlist?list=WL", 300, 11)
@@ -233,7 +233,7 @@ def _page(url: str, *links: Element) -> Snapshot:
 def test_heading_links_are_the_results_when_a_page_has_them():
     # Found live on GitHub search: the type filters ("Code (11M) results") and topic tags are
     # links too; the repositories are the links in headings.
-    from macbrow.ui import page_results
+    from oreo.ui import page_results
 
     gh = "https://github.com/"
     code_tab = _link("Code (11M) results", gh + "search?q=pw&type=code", 300, 16)
@@ -248,7 +248,7 @@ def test_heading_links_are_the_results_when_a_page_has_them():
 
 
 def test_wikipedia_skips_its_sister_project_box():
-    from macbrow.ui import page_results
+    from oreo.ui import page_results
 
     w = "https://en.wikipedia.org/"
     snap = _page(
@@ -263,7 +263,7 @@ def test_wikipedia_skips_its_sister_project_box():
 
 
 def test_unknown_site_without_headings_uses_the_main_column():
-    from macbrow.ui import page_results
+    from oreo.ui import page_results
 
     site = "https://news.example/"
     stories = [_link(f"Story number {i}", f"https://story{i}.example/", 100 + 40 * i, 60) for i in range(4)]
@@ -273,7 +273,7 @@ def test_unknown_site_without_headings_uses_the_main_column():
 
 
 def test_results_further_down_follow_those_on_screen_and_scrolled_past_ones_never_count():
-    from macbrow.ui import page_results
+    from oreo.ui import page_results
 
     yt = "https://www.youtube.com/watch?v="
     past = _link("Scrolled past", yt + "P", 151, 730, height=1)
@@ -288,7 +288,7 @@ def test_results_further_down_follow_those_on_screen_and_scrolled_past_ones_neve
 
 def test_a_heading_names_the_result_over_a_button_to_the_same_video():
     # Found live in Safari: the channel banner's "Mix" pill links to the same mix as the card below.
-    from macbrow.ui import page_results
+    from oreo.ui import page_results
 
     yt = "https://www.youtube.com/watch?v=T&list=RDT"
     button = _link("Mix", yt, 337, 1008, height=40)
@@ -301,7 +301,7 @@ def test_a_heading_names_the_result_over_a_button_to_the_same_video():
 
 
 def test_a_card_mostly_past_the_side_of_the_view_is_not_seen():
-    from macbrow.ui import shows
+    from oreo.ui import shows
 
     view = (0, 151, 1440, 689)
     assert not shows((1407, 600, 345, 23), view)  # carousel's next card: 33 px of 345 inside
@@ -312,7 +312,7 @@ def test_a_card_mostly_past_the_side_of_the_view_is_not_seen():
 
 def test_control_names_are_spoken_without_hidden_marks_or_shortcut_hints():
     # Found sending a test mail: Gmail's button is "Send ‪(⌘Enter)‬".
-    from macbrow.ui import _clean, spoken_name
+    from oreo.ui import _clean, spoken_name
 
     label = _clean("Send ‪(⌘Enter)‬")
     assert label == "Send (⌘Enter)"
@@ -320,3 +320,22 @@ def test_control_names_are_spoken_without_hidden_marks_or_shortcut_hints():
     assert spoken_name("Bold (Ctrl+B)") == "Bold"
     assert spoken_name("Discard draft (⌘⇧D)") == "Discard draft"
     assert spoken_name("Results (2024)") == "Results (2024)"  # not a shortcut: kept
+
+
+INBOX = Element("Inbox 3135 unread", "AXLink", ("Labels",), actions=("AXPress",))
+STARRED = Element("Starred", "AXLink", ("Labels",), actions=("AXPress",))
+NOT_STARRED = Element("Not starred", "AXButton", ("To: aman , Greeting",), actions=("AXPress",))
+SENT = Element("Sent", "AXLink", ("Labels",), actions=("AXPress",))
+
+
+def test_named_ignores_count_tails():
+    # Gmail labels its folders with unread counts; "open the inbox" still names the Inbox
+    assert named([SENT, INBOX, STARRED], "Open the inbox.") is INBOX
+    assert named([SENT, NOT_STARRED, STARRED], "Can you open the starred mails?") is STARRED
+
+
+def test_named_needs_one_unambiguous_element():
+    assert named([SENT, INBOX], "open my mail") is None  # nothing named
+    assert named([SENT, STARRED], "open sent and starred") is None  # two different ones
+    assert named([Element("Open", "AXButton", (), actions=("AXPress",))], "open it") is None  # only filler
+    assert named([MENU], "new playlist") is None  # menu commands are left to Jev

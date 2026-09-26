@@ -1,7 +1,7 @@
 import json
 import pathlib
 
-from macbrow import policy
+from oreo import policy
 
 SEED = json.loads((pathlib.Path(__file__).parent.parent / "tools" / "seed.json").read_text())
 
@@ -121,7 +121,7 @@ def test_allows_intended_actions():
         'tell application "System Events" to tell appearance preferences to set dark mode to true',
         'tell application "System Events" to set visible of every application process whose frontmost is false to false',
         'do shell script "pmset -g batt"',
-        'display notification "standup in five" with title "macbrow"',
+        'display notification "standup in five" with title "Oreo"',
         'tell application "Finder" to open (path to downloads folder)',
         'tell application "Spotify" to playpause',
         'tell application "Google Chrome" to execute active tab of front window javascript "document.body.style.zoom=1.1"',
@@ -166,7 +166,7 @@ def test_browser_goal_policy():
 
 
 def test_search_start_urls():
-    from macbrow.browser_task import start_url_for
+    from oreo.browser_task import start_url_for
 
     assert start_url_for("amazon", "x", "black coach lola bag") == "https://www.amazon.com/s?k=black+coach+lola+bag"
     assert start_url_for("google", "x", "handbags under 300 euros").startswith(
@@ -176,7 +176,7 @@ def test_search_start_urls():
 
 
 def test_flights_start_url_uses_natural_language_query():
-    from macbrow.browser_task import start_url_for
+    from oreo.browser_task import start_url_for
 
     goal = "find me flights from Paris to Japan\nAdditional details from the user: leave Nov 2, return Nov 7, Tokyo"
     url = start_url_for("google_flights", goal)
@@ -186,7 +186,7 @@ def test_flights_start_url_uses_natural_language_query():
 
 
 def test_script_errors_are_said_as_what_to_fix():
-    from macbrow.agent import _explain_script_error
+    from oreo.agent import _explain_script_error
 
     said = _explain_script_error(
         "execution error: Not authorized to send Apple events to Google Chrome. (-1743)", "Google Chrome"
@@ -204,7 +204,7 @@ def test_script_errors_are_said_as_what_to_fix():
 
 
 def test_browser_connect_errors_are_said_as_what_to_fix(tmp_path, monkeypatch):
-    from macbrow import browser_task as bt
+    from oreo import browser_task as bt
 
     monkeypatch.delenv("BU_CDP_WS", raising=False)
     monkeypatch.delenv("BU_CDP_URL", raising=False)
@@ -222,7 +222,7 @@ def test_browser_connect_errors_are_said_as_what_to_fix(tmp_path, monkeypatch):
 
 
 def test_chrome_connectable_reads_chromes_port_file(tmp_path, monkeypatch):
-    from macbrow import browser_task
+    from oreo import browser_task
 
     monkeypatch.delenv("BU_CDP_WS", raising=False)
     monkeypatch.delenv("BU_CDP_URL", raising=False)

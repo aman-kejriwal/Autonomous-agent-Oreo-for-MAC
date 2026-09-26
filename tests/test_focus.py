@@ -1,7 +1,7 @@
-from macbrow.applescript import ContextPoller, MacContext
-from macbrow.focus import Focus, parse_probe, probed_apps, summarize_sdef
-from macbrow.registry import ToolRegistry
-from macbrow.router import _state
+from oreo.applescript import ContextPoller, MacContext
+from oreo.focus import Focus, parse_probe, probed_apps, summarize_sdef
+from oreo.registry import ToolRegistry
+from oreo.router import _state
 
 MY_NOTE = Focus(app="Notes", kind="note", name="My_Note", id="x-coredata://X/ICNote/p1")
 TAB = Focus(app="Google Chrome", kind="tab", name="GitHub", id="https://github.com")

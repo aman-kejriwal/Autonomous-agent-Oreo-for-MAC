@@ -12,7 +12,7 @@ and session control, deleting or moving files, admin privileges, keychain/passwo
 The policy is enforced three times: when a tool is loaded (violating tools are never
 offered to the router), when a new tool is generated (rejected instead of learned), and
 right before execution on the fully rendered script (spoken arguments filled in).
-Set MACBROW_POLICY=off to disable for debugging; the agent will announce that at start.
+Set OREO_POLICY=off to disable for debugging; the agent will announce that at start.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import re
 import shlex
 from dataclasses import dataclass
 
-ENABLED = os.environ.get("MACBROW_POLICY", "strict").lower() != "off"
+ENABLED = os.environ.get("OREO_POLICY", "strict").lower() != "off"
 
 # --- Applications voice control may never script or open -------------------------------
 BLOCKED_APPS = {

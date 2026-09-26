@@ -133,7 +133,7 @@ class ContextPoller:
     async def start(self) -> MacContext:
         if self._task is None:
             self._ctx = await self._refresh()
-            self._task = asyncio.create_task(self._loop(), name="macbrow-context-poller")
+            self._task = asyncio.create_task(self._loop(), name="oreo-context-poller")
         assert self._ctx is not None
         return self._ctx
 

@@ -1,7 +1,7 @@
-from macbrow.agent import DynamicMacAgent, _has_place, _on_web_page
-from macbrow.applescript import MacContext
-from macbrow.focus import Focus
-from macbrow.registry import Tool, ToolRegistry
+from oreo.agent import DynamicMacAgent, _has_place, _on_web_page
+from oreo.applescript import MacContext
+from oreo.focus import Focus
+from oreo.registry import Tool, ToolRegistry
 
 YT = Focus("Google Chrome", "tab", "YouTube", "https://www.youtube.com/")
 AMAZON = Focus("Google Chrome", "tab", "Amazon", "https://www.amazon.in/")
@@ -76,7 +76,7 @@ def test_background_app_tools_act_elsewhere():
 
 
 def test_numbered_picks_use_the_last_results_page():
-    from macbrow.agent import _is_listing
+    from oreo.agent import _is_listing
 
     assert _is_listing("https://www.youtube.com/results?search_query=espresso")
     assert _is_listing("https://www.amazon.in/s?k=earbuds")
@@ -97,7 +97,7 @@ def test_numbered_picks_use_the_last_results_page():
 
 
 def test_youtube_results_are_read_without_the_browser_only_on_youtube():
-    from macbrow.resolvers import page_result_url
+    from oreo.resolvers import page_result_url
 
     assert page_result_url("1", "https://www.amazon.in/s?k=x") == ""
     assert page_result_url("1", "https://www.youtube.com/watch?v=x") == ""
@@ -112,7 +112,7 @@ def test_own_app_tools_stay_when_their_app_is_in_front():
 
 
 def test_media_query_drops_filler_words():
-    from macbrow.agent import _media_query
+    from oreo.agent import _media_query
 
     assert _media_query("a dynamite song") == "dynamite"
     assert _media_query("the butter song by BTS") == "butter song by BTS"  # only leading/trailing filler
@@ -123,7 +123,7 @@ def test_media_query_drops_filler_words():
 def test_questions_name_tools_briefly():
     # Found sending a test mail: "Did you want do a common action in the app or page in front or
     # open, select, press or play something by its name inside the app in front, using ...?"
-    from macbrow.agent import _say_tool
+    from oreo.agent import _say_tool
 
     reg = ToolRegistry()
     question = f"Did you want to {_say_tool(reg.get('app_action'))} or {_say_tool(reg.get('ui_press'))}?"

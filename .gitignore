@@ -26,8 +26,8 @@ tools/learned.json
 logs/
 *.log
 
-# --- Compiled HUD binary (agent.py falls back to `swift macbrow_ui.swift`) ---
-macbrow_ui
+# --- Compiled HUD binary (agent.py falls back to `swift oreo_ui.swift`) ---
+oreo_ui
 
 # --- Editors / AI assistants ---
 .claude/

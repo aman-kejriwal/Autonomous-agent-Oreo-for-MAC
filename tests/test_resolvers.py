@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from macbrow import resolvers
+from oreo import resolvers
 
 
 def test_unknown_resolver_is_a_spoken_error():
@@ -25,7 +25,7 @@ def test_youtube_empty_query_and_no_results(monkeypatch):
 
 
 def test_site_search_url_stays_on_the_open_site():
-    from macbrow.resolvers import site_search_url
+    from oreo.resolvers import site_search_url
 
     assert site_search_url("espresso song", "https://www.youtube.com/watch?v=x") == (
         "https://www.youtube.com/results?search_query=espresso+song"

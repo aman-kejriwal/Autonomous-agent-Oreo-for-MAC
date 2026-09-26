@@ -1,7 +1,7 @@
 """Fallback tier: an LLM writes a new AppleScript tool for an unseen request.
 
 Default backend is LiveKit Inference (hosted, billed to your LiveKit Cloud project; needs
-LIVEKIT_URL/API_KEY/API_SECRET). Set MACBROW_LLM_PROVIDER=lmstudio to use a local model instead.
+LIVEKIT_URL/API_KEY/API_SECRET). Set OREO_LLM_PROVIDER=lmstudio to use a local model instead.
 
 Runs once per novel intent (a couple of seconds); the result is persisted to
 ``tools/learned.json`` so Jev routes to it in ~150ms next time. Generated tools
@@ -30,19 +30,19 @@ from .applescript import MacContext
 from .focus import app_dictionary
 from .registry import BUILTIN_PLACEHOLDERS, MOVES_PATTERNS, RISKY_PATTERNS, ArgSpec, PolicyError, Tool, ToolRegistry
 
-log = logging.getLogger("macbrow.generator")
+log = logging.getLogger("oreo.generator")
 
-PROVIDER = os.environ.get("MACBROW_LLM_PROVIDER", "livekit")  # "livekit" | "lmstudio"
+PROVIDER = os.environ.get("OREO_LLM_PROVIDER", "livekit")  # "livekit" | "lmstudio"
 LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
-MODEL = os.environ.get("MACBROW_CODEGEN_MODEL", "openai/gpt-5-mini" if PROVIDER == "livekit" else "qwen/qwen3.5-9b")
+MODEL = os.environ.get("OREO_CODEGEN_MODEL", "openai/gpt-5-mini" if PROVIDER == "livekit" else "qwen/qwen3.5-9b")
 # LiveKit/OpenAI: "low" is plenty for short scripts. LM Studio + Qwen 3.5: "none", otherwise the
 # model spends the whole budget in the reasoning channel and returns empty text.
-REASONING_EFFORT = os.environ.get("MACBROW_REASONING_EFFORT", "low" if PROVIDER == "livekit" else "none")
-MAX_ATTEMPTS = int(os.environ.get("MACBROW_CODEGEN_ATTEMPTS", "3"))  # first draft + compiler-guided repairs
-MAX_OUTPUT_TOKENS = int(os.environ.get("MACBROW_CODEGEN_MAX_TOKENS", "1500"))  # bounds a runaway generation
+REASONING_EFFORT = os.environ.get("OREO_REASONING_EFFORT", "low" if PROVIDER == "livekit" else "none")
+MAX_ATTEMPTS = int(os.environ.get("OREO_CODEGEN_ATTEMPTS", "3"))  # first draft + compiler-guided repairs
+MAX_OUTPUT_TOKENS = int(os.environ.get("OREO_CODEGEN_MAX_TOKENS", "1500"))  # bounds a runaway generation
 # Jev reviews each compiled script: p(script really performs the request). Below this it is sent
 # back for repair. Probed values: fake/invented scripts 0.05-0.37, working ones 0.49-0.83.
-VERIFY_THRESHOLD = float(os.environ.get("MACBROW_VERIFY_THRESHOLD", "0.4"))
+VERIFY_THRESHOLD = float(os.environ.get("OREO_VERIFY_THRESHOLD", "0.4"))
 
 # A script must contain at least one line that plausibly *does* something. Small models
 # happily emit `tell application "Slack" / set x to y / return "done"`, which compiles and lies.

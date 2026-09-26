@@ -1,4 +1,4 @@
-from macbrow.router import _clean_value, _span_candidates, _span_confidence
+from oreo.router import _clean_value, _span_candidates, _span_confidence
 
 
 def test_span_candidates_prefers_suffixes_then_inner_spans():
@@ -40,7 +40,7 @@ def test_span_confidence_counts_wordings_of_the_same_value():
 
 def test_dictated_text_is_kept_as_said():
     # Found sending a test mail: the body lost its final period ("...Please ignore.").
-    from macbrow.registry import ToolRegistry
+    from oreo.registry import ToolRegistry
 
     reg = ToolRegistry()
     for tool, arg in [
@@ -55,7 +55,7 @@ def test_dictated_text_is_kept_as_said():
 
 
 def test_dictation_keeps_its_closing_punctuation():
-    from macbrow.router import _as_said
+    from oreo.router import _as_said
 
     said = "type Hello, this is a test mail. Please ignore."
     assert _as_said("Hello, this is a test mail. Please ignore", said) == "Hello, this is a test mail. Please ignore."

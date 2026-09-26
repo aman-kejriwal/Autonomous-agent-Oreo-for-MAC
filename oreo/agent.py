@@ -29,7 +29,7 @@ from .memory import SessionMemory
 from .registry import Tool, ToolRegistry
 from .router import JevRouter, Route
 
-log = logging.getLogger("macbrow.agent")
+log = logging.getLogger("oreo.agent")
 
 CONFIRM_THRESHOLD = 0.6
 FOLLOWUP_THRESHOLD = 0.5
@@ -804,7 +804,13 @@ class DynamicMacAgent:
                         "never a search button or search box when the item is listed.",
                         "Which on-screen element of the app should be pressed to do it? Each option is a real "
                         "element; its description says what kind it is and which section it sits in.",
-                        "Choose __none__ if no element does it.",
+                        "`conversation` only resolves references like 'it' or 'the other one'. Earlier turns "
+                        "that failed or were declined say nothing about this request: when the user names "
+                        "something that is on screen (a tab, section, folder, label or button), choose that "
+                        "element.",
+                        "Labels may carry counts or status after the name: 'Inbox 3135 unread' is the Inbox, "
+                        "'Drafts 2' is Drafts.",
+                        "Choose __none__ only if no element does it.",
                     ],
                     criteria=crit,
                 )
@@ -813,6 +819,14 @@ class DynamicMacAgent:
         ans = resp.choices["pick"]
         el = by_key.get(ans.choice)
         conf = ui.pick_confidence(ans.choice, ans.probabilities) if el else 0.0
+        if conf < min_confidence:
+            # Jev can shy away after earlier failures; an element the user named outright, that Jev
+            # itself ranks first among the real options, is what they meant.
+            said = ui.named(list(by_key.values()), utterance)
+            ranked = [k for k in sorted(ans.probabilities, key=ans.probabilities.get, reverse=True) if k in by_key]
+            if said is not None and ranked and by_key[ranked[0]] is said:
+                log.info("ui pick %r (conf=%.2f) -> %s, named outright", ans.choice, conf, said.describe())
+                el, conf = said, 1.0
         outcome.timings["ui_ms"] = (time.perf_counter() - t0) * 1e3 + snap.elapsed_ms
         log.info(
             "ui pick in %s (%d elements, %.0fms read): %r conf=%.2f",
