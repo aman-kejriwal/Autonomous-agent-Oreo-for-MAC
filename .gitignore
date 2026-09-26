@@ -1,9 +1,39 @@
-.venv/
-__pycache__/
-*.pyc
+# --- Secrets / environment ---
 .env
-.env.local
-.DS_Store
-tools/learned.json
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# --- Tooling caches ---
 .ruff_cache/
 .pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Local runtime data ---
+tools/learned.json
+logs/
+*.log
+
+# --- Compiled HUD binary (agent.py falls back to `swift macbrow_ui.swift`) ---
+macbrow_ui
+
+# --- Editors / AI assistants ---
+.claude/
+.cursor/
+.vscode/
+.idea/
+
+# --- macOS ---
+.DS_Store
