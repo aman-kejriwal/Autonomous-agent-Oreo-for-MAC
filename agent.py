@@ -50,6 +50,8 @@ HOTKEY = os.environ.get("OREO_HOTKEY", "option+space").strip()
 HOTKEY_ENABLED = HOTKEY.lower() not in ("", "off")
 # After the shortcut, this long to start talking before it goes back to sleep.
 WAKE_S = float(os.environ.get("OREO_WAKE_S", "8"))
+# The shortcut also opens a text field: type a command instead of saying it (Return sends it).
+TYPING_ENABLED = os.environ.get("OREO_TYPING", "1") != "0"
 
 
 def pretty_hotkey(spec: str) -> str:
@@ -96,6 +98,8 @@ class HUDOverlay:
         self.on_hotkey: Callable[[], None] | None = None
         self.on_hotkey_failed: Callable[[], None] | None = None
         self.on_hidden: Callable[[], None] | None = None
+        self.on_typed: Callable[[str], None] | None = None
+        self.on_dismiss: Callable[[], None] | None = None
 
     async def start(self) -> None:
         bin_path = Path(__file__).resolve().parent / "oreo_ui"
@@ -132,6 +136,12 @@ class HUDOverlay:
                     event = line.decode(errors="replace").strip()
                     if event == "HOTKEY" and self.on_hotkey:
                         self.on_hotkey()
+                    elif event.startswith("TYPED:") and self.on_typed:
+                        self.on_typed(event.removeprefix("TYPED:"))
+                    elif event == "TYPING":
+                        self.typing()
+                    elif event == "DISMISS" and self.on_dismiss:
+                        self.on_dismiss()
                     elif event == "HOTKEY_FAILED":
                         self.hotkey_failed = True
                         if self.on_hotkey_failed:
@@ -180,8 +190,19 @@ class HUDOverlay:
     def wake(self) -> None:
         """The shortcut was pressed: pop up and give the user ``WAKE_S`` to start talking."""
         self.show()
+        self.ask_for_input()
         if not (self._user_speaking or self._agent_active or self._busy):
             self.hide(delay=max(WAKE_S, HUD_IDLE_S))
+
+    def ask_for_input(self) -> None:
+        """Show the text field so the user can type (the HUD takes the keyboard until Return/Escape)."""
+        if TYPING_ENABLED and self._visible:
+            self._send("INPUT")
+
+    def typing(self) -> None:
+        """Keys are going into the field: don't close under the user while they type."""
+        self.show()
+        self.hide(delay=max(WAKE_S, HUD_IDLE_S) * 3)
 
     def sleep(self) -> None:
         """The shortcut was pressed again: close now."""
@@ -329,14 +350,26 @@ class OreoAgent(Agent):
 
     async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
         text = new_message.text_content or ""
-        if not text.strip():
+        if not text.strip() or not await self.run_turn(text):
             raise StopResponse()
+        # else: the chat LLM answers (normal reply)
 
+    async def run_typed(self, text: str) -> None:
+        """A command typed into the HUD: the same turn as a spoken one, then the field again."""
+        await self.mac.context.refresh()  # the HUD just handed the front back to the user's app
+        if await self.run_turn(text):
+            self.session.generate_reply(user_input=text)
+        self.hud.ask_for_input()
+
+    async def run_turn(self, text: str) -> bool:
+        """Handle one command, spoken or typed. True when the chat LLM should answer it."""
         # Show HUD with user text and start loading. It stays up while the turn runs.
         with self.hud.busy():
             self.hud.set_text(text)
             self.hud.loading()
             outcome = await self.mac.handle(text)
+            if outcome.refined:  # show what it understood after repairing a mishearing
+                self.hud.set_text(outcome.refined)
         r = outcome.route
         log.info(
             "turn %r -> %s timings=%s",
@@ -351,7 +384,7 @@ class OreoAgent(Agent):
             await self.update_instructions(
                 INSTRUCTIONS + (f"\n\nThis session so far, oldest first:\n{history}" if history else "")
             )
-            return  # normal LLM reply
+            return True
 
         if outcome.stop:  # the user explicitly ended the session: close now, not after the idle wait
             self.hud.done()
@@ -361,13 +394,13 @@ class OreoAgent(Agent):
                 # Push-to-talk: "stop" ends this conversation, not the assistant; the shortcut wakes it.
                 self.mac.memory.clear()
                 self.session.say(outcome.speak or "Goodbye.", add_to_chat_ctx=False)
-                raise StopResponse()
+                return False
             try:
                 await self.session.say(outcome.speak or "Goodbye.", add_to_chat_ctx=False)
             except RuntimeError:
                 pass
             get_job_context().shutdown(reason="user asked oreo to stop")
-            raise StopResponse()
+            return False
 
         self.hud.done()
         if outcome.speak:
@@ -377,7 +410,7 @@ class OreoAgent(Agent):
                 self.session.say(outcome.speak, add_to_chat_ctx=True)
             except RuntimeError as e:  # session closing mid-turn (ctrl-c during a route)
                 log.warning("could not speak result: %s", e)
-        raise StopResponse()
+        return False
 
 
 server = AgentServer()
@@ -458,7 +491,19 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         (os.environ.get("GRADIUM_VOICE_ID") or "gradium default") if SPEECH_PROVIDER == "gradium" else LOCAL_VOICE,
         LLM_PROVIDER,
     )
-    await session.start(agent=OreoAgent(mac, hud), room=ctx.room)
+    oreo = OreoAgent(mac, hud)
+    await session.start(agent=oreo, room=ctx.room)
+
+    typed_turns: set[asyncio.Task] = set()
+
+    def _on_typed(text: str) -> None:
+        log.info("typed: %r", text)
+        task = asyncio.create_task(oreo.run_typed(text))
+        typed_turns.add(task)
+        task.add_done_callback(typed_turns.discard)
+
+    hud.on_typed = _on_typed
+    hud.on_dismiss = hud.sleep
 
     # Push-to-talk: the mic is deaf until the shortcut, and again once the pop-up hides.
     gate: MicGate | None = None

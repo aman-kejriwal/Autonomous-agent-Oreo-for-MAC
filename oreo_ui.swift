@@ -14,10 +14,13 @@
 //   TEXT:<message>        – set the transcript text
 //   RESPONSE:<message>    – set the response text (revealed word by word)
 //   STATE:<mode>          – listening | hearing | thinking | speaking (overrides inferred states)
+//   INPUT                 – show a text field and take the keyboard, so the user can type a command
 //   QUIT                  – exit the process
 //
 // Output (stdout): HOTKEY when the activation shortcut is pressed, HOTKEY_FAILED if it can't be
-// registered (another app owns it or the spec is invalid).
+// registered (another app owns it or the spec is invalid), TYPED:<text> when a typed command is
+// submitted with Return, DISMISS when Escape closes the field, TYPING (at most every 2 s) while
+// keys go into the field so the pop-up isn't closed under the user.
 //
 // Environment: OREO_HUD_GLOW=0 turns off the screen-edge glow. OREO_HOTKEY sets the
 // activation shortcut, e.g. "option+space" (default), "control+option+m"; "off" disables it.
@@ -114,6 +117,8 @@ class HUDState: ObservableObject {
     @Published var mode = Mode.listening
     @Published var topInset: CGFloat = 32
     @Published var cornerRadius: CGFloat = 0
+    @Published var typing = false  // the text field is up and has the keyboard
+    @Published var draft = ""
 
     let glowEnabled = ProcessInfo.processInfo.environment["OREO_HUD_GLOW"] != "0"
     let phase = Phase()
@@ -203,7 +208,7 @@ struct Island: View {
     var body: some View {
         let radius: CGFloat = 30
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        let expanded = !idle
+        let expanded = !idle || state.typing
 
         CapWidth(max: 560) {
             HStack(alignment: .center, spacing: 14) {
@@ -211,7 +216,7 @@ struct Island: View {
                     .frame(width: expanded ? 50 : 34, height: expanded ? 50 : 34)
 
                 VStack(alignment: .leading, spacing: 7) {
-                    if idle {
+                    if idle && !state.typing {
                         Shimmer(text: label, t: t, font: .system(size: 15, weight: .semibold, design: .rounded))
                             .transition(.blurFade)
                     }
@@ -230,6 +235,10 @@ struct Island: View {
                     }
                     if !state.response.isEmpty {
                         WordReveal(text: state.response, start: state.responseStart, t: t)
+                            .transition(.blurFade)
+                    }
+                    if state.typing {
+                        TypeField(state: state, followUp: !idle, tint: look.color(0))
                             .transition(.blurFade)
                     }
                 }
@@ -258,6 +267,7 @@ struct Island: View {
         .animation(.spring(response: 0.5, dampingFraction: 0.78), value: state.response)
         .animation(.spring(response: 0.5, dampingFraction: 0.78), value: state.loading)
         .animation(.spring(response: 0.5, dampingFraction: 0.78), value: state.mode)
+        .animation(.spring(response: 0.5, dampingFraction: 0.78), value: state.typing)
     }
 
     private var label: String {
@@ -296,30 +306,92 @@ extension View {
     }
 }
 
-/// Two sparks of the orb's colours running around the glass edge.
+/// Two sparks of the orb's colours running around the glass edge. They move by distance along the
+/// border (not by angle around the centre), so on a wide pill they keep one length and one speed
+/// instead of shrinking over the long edges and stretching round the ends.
 struct TravelingRim: View {
     let look: Look
     let phase: Double
     let shape: RoundedRectangle
 
     var body: some View {
-        let gradient = AngularGradient(
-            stops: [
-                .init(color: .clear, location: 0),
-                .init(color: look.color(0, 0.95), location: 0.09),
-                .init(color: .clear, location: 0.22),
-                .init(color: .clear, location: 0.5),
-                .init(color: look.color(3, 0.8), location: 0.61),
-                .init(color: .clear, location: 0.74),
-                .init(color: .clear, location: 1),
-            ],
-            center: .center, angle: .radians(phase * 0.9))
+        let head = phase * 0.14  // laps per unit of phase: ~16 s a lap when calm, ~3.5 s when thinking
         ZStack {
-            shape.strokeBorder(gradient, lineWidth: 1.4)
-            shape.strokeBorder(gradient, lineWidth: 5).blur(radius: 6).opacity(0.7 * look.glow)
+            Spark(radius: shape.cornerSize.width, head: head, color: look.color(0), glow: look.glow)
+            Spark(radius: shape.cornerSize.width, head: head + 0.5, color: look.color(3), glow: look.glow)
         }
         .blendMode(.plusLighter)
         .allowsHitTesting(false)
+    }
+}
+
+/// A bright head with a tail that fades behind it, drawn as nested segments of the border.
+struct Spark: View {
+    let radius: CGFloat
+    let head: Double  // position along the border, in laps (wraps)
+    let color: Color
+    let glow: Double
+
+    private let length = 0.16  // fraction of the border the tail covers
+    private let layers = 6
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<layers, id: \.self) { i in
+                let k = Double(i + 1) / Double(layers)  // shorter segments stack up near the head
+                BorderArc(radius: radius, from: head - length * k, to: head)
+                    .stroke(color.opacity(0.22), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+            }
+            BorderArc(radius: radius, from: head - length * 0.5, to: head)
+                .stroke(color, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .blur(radius: 5)
+                .opacity(0.55 * glow)
+        }
+    }
+}
+
+/// A stretch of the rounded border between two positions measured in laps; wraps past the start.
+struct BorderArc: Shape {
+    let radius: CGFloat
+    var from: Double
+    var to: Double
+
+    func path(in rect: CGRect) -> Path {
+        let inset = rect.insetBy(dx: 0.75, dy: 0.75)  // keep the stroke on the glass edge
+        let border = RoundedRectangle(cornerRadius: max(radius - 0.75, 0), style: .continuous).path(in: inset)
+        let a = from - floor(from)
+        let b = a + (to - from)
+        if b <= 1 { return border.trimmedPath(from: a, to: b) }
+        var out = border.trimmedPath(from: a, to: 1)
+        out.addPath(border.trimmedPath(from: 0, to: b - 1))
+        return out
+    }
+}
+
+/// Type instead of talk: Return sends the command, Escape closes Oreo.
+struct TypeField: View {
+    @ObservedObject var state: HUDState
+    let followUp: Bool
+    let tint: Color
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("", text: $state.draft,
+                  prompt: Text(followUp ? "Ask a follow-up…" : "Ask Oreo…").foregroundStyle(.white.opacity(0.45)))
+            .textFieldStyle(.plain)
+            .font(.system(size: 16, weight: .semibold, design: .rounded))
+            .foregroundStyle(.white)
+            .tint(tint)
+            .frame(width: 340)
+            .focusEffectDisabled()
+            .focused($focused)
+            .onAppear { DispatchQueue.main.async { focused = true } }
+            .onChange(of: state.draft) { typingActivity() }
+            .onSubmit { submitTyped() }
+            .onExitCommand {
+                emit("DISMISS")
+                endTyping()
+            }
     }
 }
 
@@ -552,7 +624,8 @@ struct VisualEffectBlur: NSViewRepresentable {
 // ---------------------------------------------------------------------------
 
 class HUDPanel: NSPanel {
-    override var canBecomeKey: Bool { false }
+    var allowKey = false  // only while the text field is up; the rest of the time it never takes focus
+    override var canBecomeKey: Bool { allowKey }
     override var canBecomeMain: Bool { false }
 }
 
@@ -677,6 +750,60 @@ func registerHotkey() {
 registerHotkey()
 
 // ---------------------------------------------------------------------------
+// MARK: – Typing (the panel is non-activating: it takes the keys, the app in front stays in front)
+// ---------------------------------------------------------------------------
+
+/// The app the user was in when the field opened; it gets the keyboard (and the front) back.
+var appBeforeTyping: NSRunningApplication?
+
+func beginTyping() {
+    hudState.draft = ""
+    hudState.typing = true
+    panel.allowKey = true
+    // Chrome, VS Code and other Chromium/Electron apps keep the keyboard unless we are the active
+    // app, so activate for the length of the typing, like Spotlight does, and hand it back after.
+    let front = NSWorkspace.shared.frontmostApplication
+    if front?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+        appBeforeTyping = front
+    }
+    NSApp.activate(ignoringOtherApps: true)
+    panel.makeKeyAndOrderFront(nil)
+}
+
+/// Give the keyboard back to the app in front.
+func endTyping() {
+    let wasTyping = hudState.typing
+    hudState.typing = false
+    panel.allowKey = false
+    if panel.isKeyWindow { panel.resignKey() }
+    guard wasTyping, let previous = appBeforeTyping else { return }
+    appBeforeTyping = nil
+    if #available(macOS 14.0, *) { NSApp.yieldActivation(to: previous) }
+    previous.activate()
+}
+
+var lastTypingSignal = 0.0
+
+func typingActivity() {
+    let now = Date().timeIntervalSinceReferenceDate
+    if now - lastTypingSignal > 2 {
+        lastTypingSignal = now
+        emit("TYPING")
+    }
+}
+
+func submitTyped() {
+    let text = hudState.draft.split(whereSeparator: \.isNewline).joined(separator: " ")
+        .trimmingCharacters(in: .whitespaces)
+    guard !text.isEmpty else { return }
+    endTyping()  // before the command runs, so anything it types lands in the app in front
+    hudState.transcript = text
+    hudState.response = ""
+    // Let the previous app be in front again before the agent reads what is in front.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { emit("TYPED:" + text) }
+}
+
+// ---------------------------------------------------------------------------
 // MARK: – stdin command reader (background thread → main-thread dispatch)
 // ---------------------------------------------------------------------------
 
@@ -689,6 +816,7 @@ DispatchQueue.global(qos: .userInitiated).async {
                 hudState.response = ""
                 hudState.visible = true
             } else if trimmed == "HIDE" {
+                endTyping()
                 hudState.visible = false
                 // Clear text after the lift-out finishes
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
@@ -706,6 +834,7 @@ DispatchQueue.global(qos: .userInitiated).async {
                 hudState.loading = false
                 hudState.setMode(.listening, explicit: false)
             } else if trimmed.hasPrefix("TEXT:") {
+                if hudState.draft.isEmpty { endTyping() }  // they spoke instead; keep a half-typed draft
                 hudState.transcript = String(trimmed.dropFirst(5))
                 hudState.response = ""
                 hudState.setMode(.hearing, explicit: false)
@@ -716,6 +845,8 @@ DispatchQueue.global(qos: .userInitiated).async {
                 hudState.setMode(.speaking, explicit: false)
             } else if trimmed.hasPrefix("STATE:"), let m = Mode(rawValue: String(trimmed.dropFirst(6))) {
                 hudState.setMode(m, explicit: true)
+            } else if trimmed == "INPUT" {
+                if hudState.visible { beginTyping() }
             } else if trimmed == "QUIT" {
                 NSApp.terminate(nil)
             }

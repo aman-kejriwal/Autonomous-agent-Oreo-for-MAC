@@ -21,7 +21,7 @@ from typing import Any
 
 from typesafe_sdk import Choice
 
-from . import answer, browser_task, policy, resolvers, ui
+from . import answer, browser_task, policy, refine, resolvers, ui
 from .applescript import ContextPoller, run_applescript
 from .focus import probed_apps
 from .generator import DUPLICATE, ToolGenerator
@@ -87,6 +87,8 @@ class Outcome:
     learned: Tool | None = None
     timings: dict[str, float] = field(default_factory=dict)
     recorded: bool = False  # steps already went into session memory one by one
+    refined: str | None = None  # the repaired command this outcome came from (see refine.py)
+    missed: bool = False  # a press on screen found nothing that does it
 
 
 @dataclass
@@ -145,7 +147,7 @@ class DynamicMacAgent:
         ctx = await self.context.latest()
         outcome = await self._handle(utterance)
         if not outcome.recorded:
-            self._remember_turn(utterance, ctx, outcome)
+            self._remember_turn(outcome.refined or utterance, ctx, outcome)
         return outcome
 
     def _remember_turn(self, utterance: str, ctx, outcome: Outcome) -> None:
@@ -160,7 +162,7 @@ class DynamicMacAgent:
         place = ctx.focus.name if ctx.focus else ""
         self.memory.add(utterance, ctx.active_app, place, did, outcome.speak or "", values)
 
-    async def _handle(self, utterance: str, allow_steps: bool = True) -> Outcome:
+    async def _handle(self, utterance: str, allow_steps: bool = True, allow_refine: bool = True) -> Outcome:
         t0 = time.perf_counter()
         ctx = await self.context.latest()
         self._remember_listing(ctx)
@@ -269,6 +271,8 @@ class DynamicMacAgent:
             # ("send it" with a compose window open is its Send button, whatever tools came close).
             if await self._press_on_screen(utterance, ctx, outcome, min_confidence=UI_FALLBACK_CONFIDENCE):
                 return outcome
+            if allow_refine and (retry := await self._refined_retry(utterance, ctx, "unsure route")):
+                return retry
             # The runner-up among the other tools (the staged one can itself be the runner-up
             # when a hesitant new_action was turned into a question about it).
             others = sorted(
@@ -285,6 +289,8 @@ class DynamicMacAgent:
 
         if route.kind == "tool" and route.tool:
             if route.weakest_arg and route.weakest_arg[1] < ARG_CONFIDENCE_FLOOR:
+                if allow_refine and (retry := await self._refined_retry(utterance, ctx, "unsure argument")):
+                    return retry
                 name, _ = route.weakest_arg
                 outcome.speak = f"Which {name} did you mean? I heard {route.args.get(name, 'nothing')}."
                 self._stage(route.tool, route.args)
@@ -345,6 +351,12 @@ class DynamicMacAgent:
                 # "a dynamite song" finds odd covers first; "dynamite" finds the song
                 route.args["query"] = _media_query(route.args["query"])
             await self._execute(route.tool, route.args, outcome, utterance=utterance)
+            if (
+                outcome.missed
+                and allow_refine
+                and (retry := await self._refined_retry(utterance, ctx, "not on screen"))
+            ):
+                return retry
             if outcome.executed and wants_play:
                 await self._play_from_results(utterance, route.args.get("query", ""), outcome)
             return outcome
@@ -352,6 +364,10 @@ class DynamicMacAgent:
         # new_action: first, is it simply something on screen in the front app ("open liked songs")?
         if await self._press_on_screen(utterance, ctx, outcome, min_confidence=UI_FALLBACK_CONFIDENCE):
             return outcome
+
+        # Maybe it was misheard: repair and retry once before writing a whole new tool for it.
+        if allow_refine and (retry := await self._refined_retry(utterance, ctx, "no tool fits")):
+            return retry
 
         # -> heavy tier
         if self.generator is None:
@@ -391,6 +407,32 @@ class DynamicMacAgent:
         return outcome
 
     # ---------------------------------------------------------------- helpers
+    async def _refined_retry(self, utterance: str, ctx, why: str) -> Outcome | None:
+        """Jev couldn't make sense of ``utterance``: repair likely mishearings with the LLM (hinted
+        by what is on screen) and run the repaired command once. None when refining is off, the
+        repair changed nothing, or it failed; the caller then carries on as before."""
+        if not refine.ENABLED or self.state is not State.IDLE:
+            return None
+        t0 = time.perf_counter()
+        snap = await self._ui_snapshot(ctx)
+        labels = [e.label for e in snap.elements if not e.in_menu] if snap else []
+        try:
+            better = await refine.repair(
+                utterance, ctx.active_app, labels, ctx.running_apps, conversation=self.memory.as_text(4)
+            )
+        except Exception:
+            log.exception("transcript repair failed")
+            return None
+        refine_ms = (time.perf_counter() - t0) * 1e3
+        if better is None:
+            log.info("refine (%s): %r unchanged %.0fms", why, utterance, refine_ms)
+            return None
+        log.info("refine (%s): %r -> %r %.0fms", why, utterance, better, refine_ms)
+        retry = await self._handle(better, allow_refine=False)
+        retry.refined = better
+        retry.timings["refine_ms"] = refine_ms
+        return retry
+
     async def _execute_browser(self, tool: Tool, args: dict[str, str], outcome: Outcome, utterance: str) -> None:
         refusal = _browser_refusal(utterance, 0.0)
         if refusal:
@@ -1099,6 +1141,7 @@ class DynamicMacAgent:
             if args.get("label"):  # confirmed earlier: press that exact element
                 await self._press_confirmed(args, ctx, outcome)
             elif not await self._press_on_screen(utterance, ctx, outcome, min_confidence=UI_PRESS_CONFIDENCE):
+                outcome.missed = not outcome.speak
                 outcome.speak = outcome.speak or f"I can't find that in {ctx.active_app}."
             return
         ctx = await self.context.latest()

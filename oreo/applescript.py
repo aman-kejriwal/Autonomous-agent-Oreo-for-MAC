@@ -56,9 +56,16 @@ _FRONTMOST = 'tell application "System Events" to get name of first application 
 _RUNNING = 'tell application "System Events" to get name of every application process whose background only is false'
 
 
+# Oreo's own pop-up (built, or run as a script). It takes the keyboard while the user types a
+# command; it is never "the app in front" that commands act on.
+HUD_PROCESSES = {"oreo_ui", "swift-frontend"}
+
+
 async def get_active_app(fallback: str = "Finder") -> str:
     res = await run_applescript(_FRONTMOST, timeout=5)
-    return res.output if res.ok and res.output else fallback
+    if not res.ok or not res.output or res.output.lower() in HUD_PROCESSES:
+        return fallback
+    return res.output
 
 
 async def get_running_apps(fallback: list[str] | None = None) -> list[str]:
@@ -67,7 +74,7 @@ async def get_running_apps(fallback: list[str] | None = None) -> list[str]:
     res = await run_applescript(_RUNNING, timeout=5)
     if not res.ok or not res.output:
         return fallback or ["Finder"]
-    apps = [a.strip() for a in res.output.split(",") if a.strip()]
+    apps = [a.strip() for a in res.output.split(",") if a.strip() and a.strip().lower() not in HUD_PROCESSES]
     return sorted(set(apps), key=str.lower)
 
 

@@ -25,16 +25,21 @@ async def about_screen(question: str, app: str, screen: str, conversation: str =
     user = (
         f"App in front: {app}\n\nSession so far:\n{conversation or '-'}\n\nOn screen:\n{screen}\n\nQuestion: {question}"
     )
+    return await complete(SYSTEM, user, max_tokens=160)
+
+
+async def complete(system: str, user: str, max_tokens: int) -> str:
+    """One short, non-streamed reply from the chat LLM (LiveKit Inference or LM Studio)."""
     if PROVIDER == "livekit":
         from livekit.agents import inference, llm
 
         model = inference.LLM(
             model=os.environ.get("OREO_CHAT_MODEL", "openai/gpt-5-mini"),
-            extra_kwargs={"reasoning_effort": "minimal", "max_completion_tokens": 160},
+            extra_kwargs={"reasoning_effort": "minimal", "max_completion_tokens": max_tokens},
         )
         try:
             ctx = llm.ChatContext()
-            ctx.add_message(role="system", content=SYSTEM)
+            ctx.add_message(role="system", content=system)
             ctx.add_message(role="user", content=user)
             async with model.chat(chat_ctx=ctx) as stream:
                 return "".join([c async for c in stream.to_str_iterable()]).strip()
@@ -47,9 +52,9 @@ async def about_screen(question: str, app: str, screen: str, conversation: str =
     try:
         resp = await client.chat.completions.create(
             model=os.environ.get("OREO_CHAT_MODEL", "qwen/qwen3.5-9b"),
-            max_tokens=160,
+            max_tokens=max_tokens,
             temperature=0.2,
-            messages=[{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             extra_body={"reasoning_effort": os.environ.get("OREO_REASONING_EFFORT", "none")},
         )
         return (resp.choices[0].message.content or "").strip()
